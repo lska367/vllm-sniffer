@@ -101,6 +101,18 @@ tracer 本身保持无状态。
 - [ ] 多卡 TP/PP（rank 事件字段已预留）与 Ray 集群（node_id + 本地落盘）
 - [ ] OTLP sink（可插拔，对接现有可观测栈）
 
+## 文档
+
+- `doc/README.md` — 文档索引与建议阅读路径
+- `doc/ARCHITECTURE.md` — 架构设计解析（进程模型、数据流、hook 点、设计原则）
+- `doc/CODE_WALKTHROUGH.md` — 代码走读指南（含 vLLM 源码对照表与自测题）
+- `doc/EVENT_SCHEMA.md` — 事件流 schema 参考手册
+- `doc/EXTENSION_ROADMAP.md` — 延伸拓展路线图（分优先级）
+- `doc/RESEARCH_PLATFORM.md` — 科研工具平台规划
+- `doc/RESUME_PROJECT.md` — 求职简历项目材料（中英双语）
+- `doc/VALIDATION_LOG.md` — 真机验证记录（证据档案）
+- `doc/CONTRIBUTING.md` — 贡献指南
+
 ## 开发
 
 ```bash
