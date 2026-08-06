@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtualenvs
+.venv/
+.venv-gpu/
+
+# Test artifacts
+/tmp/
+
+# Editor
+.vscode/
+.idea/
+*.swp

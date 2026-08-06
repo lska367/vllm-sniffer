@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vllm-sniffer"
+version = "0.1.0"
+description = "Non-invasive runtime tracer for vLLM inference: scheduler, KV cache, per-request timeline, and float nondeterminism observation"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "msgspec>=0.18",
+]
+
+[project.entry-points."vllm.general_plugins"]
+# vLLM loads this entry point automatically at import time in every process
+# (API server, engine core, GPU workers). The loaded function must be
+# idempotent and must never raise.
+vllm_sniffer = "vllm_sniffer:load"
+
+[tool.hatch.build.targets.wheel]
+packages = ["vllm_sniffer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
