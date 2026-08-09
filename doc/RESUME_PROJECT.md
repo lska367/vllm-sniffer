@@ -34,11 +34,14 @@ JSONL 事件流设计 / pytest 测试工程（无真实依赖的假模块注入�
 ### 亮点 B：低开销热路径观测
 
 - **Situation**：推理热路径（每次采样、每步调度）上做观测，开销必须可控
-- **Task**：承诺 <1% 开销且绝不阻塞推理
+- **Task**：热路径观测开销可控、可量化，绝不阻塞推理
 - **Action**：无锁有界队列（满则丢弃计数）+ daemon 线程落盘；
   flip 检测的 topk(2)/mask/nonzero 全部在 GPU 上完成，只把罕见 flip 行
   拷回 host，每步仅 1 次标量设备同步；高频事件按采样率降频
-- **Result**：实测对 decode 步（毫秒级）无感知影响；队列满时丢事件不阻塞
+- **Result**：2026-08-09 真机量化（V100/0.5B）：事件管线 ≈0
+  （margin-off +2.0%，噪声内）；margin 探针 −21.7%（小模型成本上限，
+  `VLLM_SNIFFER_MARGIN=0` 可关；topk 只随 vocab 规模，大模型相对成本
+  预计显著下降）；队列满丢事件不阻塞
 
 ### 亮点 C：浮点不确定性量化观测（研究型亮点）
 
@@ -47,9 +50,13 @@ JSONL 事件流设计 / pytest 测试工程（无真实依赖的假模块注入�
 - **Action**：论证 temp=0 走 argmax 本身确定 → 输出不同 = logits 微差 →
   定义 argmax margin（top1-top2），margin < 1e-3 为 flip 区；
   产出 sample_flip / sample_stats 事件
-- **Result**：真机（V100 + Qwen2.5-0.5B）实测 64-token 输出中 19 个
-  位置处于 flip 区——temp=0 不稳定性的量化证据；归因方向锁定
-  （batch 组成、前缀缓存、preemption、cudagraph、多卡 AllReduce）
+- **Result**：2026-08-09 真机全链路证据链（V100 + Qwen2.5-0.5B）：
+  同 batch 8 个相同 prompt + temp=0 → 2 个唯一输出，分叉点稳定在位置 13
+  （token 476 "of" vs 13 "\n"，margin=2⁻¹⁰ 即 fp16 精度下限）；flip 事件精确
+  命中该 token 对×21；logits 位级指纹 solo-vs-solo IDENTICAL（Δ=0）、
+  solo-vs-mixed LOW-BIT NOISE 92.4% 差异集中在尾数位 13..22——把"玄学"
+  变成可复现的"测量 → 归因 → 验证"闭环；归因方向锁定（batch 组成、
+  前缀缓存、preemption、cudagraph、多卡 AllReduce）
 
 ## 4. 简历条目（直接可用）
 
@@ -60,18 +67,21 @@ vllm-sniffer — Non-invasive runtime tracer for vLLM (GitHub open-source projec
 - Built a zero-code-intrusion tracer injected via vLLM's official plugin
   mechanism: pip install enables full observability (request lifecycle,
   scheduler, forward pass, sampler) across API-server/engine-core/worker
-  processes without modifying vLLM or changing inference behavior.
-- Designed a <1%-overhead hot-path pipeline: bounded non-blocking queue +
-  daemon writer thread (drop-on-full, never blocks inference); GPU-side
-  argmax-margin probe emits only rare flip positions (1 scalar device sync
-  per step), with sampling for high-frequency events.
-- Quantified temperature=0 output instability: proved argmax is deterministic
-  given logits, defined the flip zone (top1-top2 < 1e-3), and measured
-  19/64 flip-zone positions on V100 + Qwen2.5-0.5B — hard evidence for a
-  well-known production pain point.
+  processes without modifying vLLM or changing inference behavior; a
+  register_at_fork writer guarantees safe multi-process capture.
+- Measured overhead (V100/Qwen2.5-0.5B): event pipeline ≈0 (margin-off
+  +2.0%); GPU-side argmax-margin probe −21.7% on a small model
+  (flip detection stays on GPU, 1 scalar sync/step; switch off via env).
+- Quantified temperature=0 output instability end-to-end: 8 identical
+  prompts in one batch → 2 distinct outputs with a stable divergence point
+  at position 13 (margin = 2^-10, fp16 epsilon floor); flip events hit the
+  exact (476,13) token pair ×21. Added a default-off bit-level logits
+  fingerprint mode distinguishing IDENTICAL runs (Δ=0) from LOW-BIT-NOISE
+  runs (92.4% of diffs in mantissa bits 13..22) caused by batch changes.
 - Verified on real hardware (offline eager/cudagraph, online api_server
-  with streaming + client abort); 35 unit tests with zero real vLLM/GPU
-  dependency (fake-module injection), 7 event types with stable JSONL schema.
+  with streaming + client abort); 90 unit tests with zero real vLLM/GPU
+  dependency (fake-module injection), 12 event types, stable JSONL schema
+  (schema_ver=1).
 ```
 
 ### 中文版
@@ -79,14 +89,18 @@ vllm-sniffer — Non-invasive runtime tracer for vLLM (GitHub open-source projec
 ```
 vllm-sniffer — vLLM 非侵入式运行时 tracer（开源项目）
 - 零代码侵入：通过 vLLM 官方插件机制自动加载，pip 安装即生效；
-  不改源码、不改推理行为，API server / engine core / worker 三进程全覆盖
-- <1% 开销热路径观测：有界队列满则丢弃不阻塞 + daemon 线程落盘；
-  argmax-margin 探针全在 GPU 上完成，每步仅 1 次设备同步
-- 量化 temp=0 输出不稳定：论证 argmax 确定 → logits 微差 → 定义 flip 区
-  （top1-top2 < 1e-3）；V100 实测 64 token 输出中 19 个 flip 区位置，
-  为该生产痛点提供硬数据
-- 真机验证 offline/online 全场景；35 个单元测试不依赖真实 vLLM/GPU
-  （假模块注入）；7 类事件、稳定 JSONL schema（schema_ver=1）
+  不改源码、不改推理行为，API server / engine core / worker 三进程全覆盖；
+  fork/spawn 两种子进程模型的 writer 安全（register_at_fork 重置）
+- 开销真机实测（V100/0.5B）：事件管线 ≈0（margin-off +2.0%）；
+  argmax-margin 探针小模型上 −21.7%（GPU 侧 flip 检测、每步 1 次标量
+  同步，`VLLM_SNIFFER_MARGIN=0` 可关，大模型相对成本预计显著更低）
+- 量化 temp=0 输出不稳定（2026-08-09 证据链）：同 batch 8 个相同 prompt
+  → 2 个唯一输出、分叉点稳定在位置 13（margin=2⁻¹⁰ fp16 下限）；flip
+  事件精确命中分叉 token 对×21；logits 位级指纹（深挖模式，默认关）区分
+  IDENTICAL（Δ=0）与 LOW-BIT NOISE（92.4% 差异在尾数位 13..22，batch
+  组成所致）——为该生产痛点提供可复现硬数据
+- 真机验证 offline/online 全场景；90 个单元测试不依赖真实 vLLM/GPU
+  （假模块注入）；12 类事件、稳定 JSONL schema（schema_ver=1）
 ```
 
 ## 5. 面试问答（高频问题与答案要点）
@@ -108,11 +122,13 @@ A：热路径序列化要快、分配要少；msgspec 是编译型编码器（�
 零中间 dict 分配）。Struct 加 `gc=False` 减少 GC 压力。代价是字段约束
 更严（kw_only 等），换来类型安全。
 
-**Q4：开销怎么证明 <1%？**
-A：设计上：热路径只 put_nowait（O(1)）入队；采样探针每步 1 次 topk(2)
-kernel + 1 次标量同步，相对 decode 步（毫秒级）可忽略；flip 行只拷罕见值。
-验证上：flip 检测开关（VLLM_SNIFFER_MARGIN=0）对比前后吞吐（待补实测
-数据——诚实说明：目前靠设计论证 + 真机观测无感知，量化对比是 TODO）。
+**Q4：开销怎么证明？实际数字？**
+A：2026-08-09 真机量化（V100 + Qwen2.5-0.5B，三臂对比）：
+baseline 1700 tok/s → margin 关 +2.0%（事件管线几乎免费）→ margin 开
+−21.7%（1331 tok/s，topk(2)+每步同步的成本）。两点防御：margin 探针
+可关（`VLLM_SNIFFER_MARGIN=0`），深挖模式默认关；topk 只随 vocab 规模
+而不随 batch/序列长度，所以大模型/大 batch 上相对成本会显著下降
+（待 A100/H100 复测）。真实数字必须按配置区分再说。
 
 **Q5：为什么 temp=0 输出还会不同？**
 A：vLLM 里 temp=0 走 `logits.argmax(dim=-1)`，给定 logits 是确定的。
@@ -124,7 +140,7 @@ margin 观测"哪些位置脆弱"，用对拍定位"哪些因素触发差异"。
 **Q6：测试不依赖真实 vLLM 是怎么做到的？**
 A：conftest 里构造假 vllm 包树注入 sys.modules，hook 代码走真实的
 `from vllm.xxx import ...` 路径但拿到的是可编程的假类；fork 测试用真
-fork 子进程 + 管道回报。好处：CI 无 GPU/vLLM 依赖，35 个测试秒级跑完。
+fork 子进程 + 管道回报。好处：CI 无 GPU/vLLM 依赖，90 个测试秒级跑完。
 
 **Q7：这个项目最难的 bug 是什么？**
 A：writer 定时 flush 的漏尾问题——只在收到事件时检查时间，导致
@@ -139,7 +155,8 @@ A：实时（OTLP/推送）是 P2 方向，但研究场景的核心诉求是可�
 
 - 项目是个人独立开发，但**基于对 vLLM 源码的深入阅读**（v0.19.1），
   hook 点选择有源码依据；真机验证环境是自备 V100
-- 开销 <1% 目前是**设计论证 + 真机无感知**，逐场景量化基准（开/关对比
-  吞吐）在 roadmap 中（P0-4 附近）——面试被追问时如实说，别吹
-- 多卡（TP/PP）与 Ray 尚未真机验证（rank 字段预留），scalability 叙事
-  未完成——这是后续主线之一
+- 开销有 2026-08-09 真机数字（事件管线 ≈0 / margin 探针 −22%），但只测了
+  0.5B/V100 一种场景——大模型上相对成本预计显著下降，A100/H100 复测
+  是 TODO；面试主动区分"事件管线"与"margin 探针"两类开销
+- 多卡（TP/PP）与 Ray 尚未真机验证（rank 字段预留、step 按 rank 关联
+  待做），scalability 叙事未完成——这是后续主线之一

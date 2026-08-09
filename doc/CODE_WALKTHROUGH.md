@@ -57,7 +57,8 @@ run_id 必须在 vLLM fork/spawn 子进程**之前**导出 env，否则各进程
 四个设计点，每个都是坑的产物：
 
 1. **有界队列 + put_nowait**：生产端（hook）绝不被慢磁盘阻塞；
-   Full → dropped 计数。这是"<1% 开销"承诺的实现基础
+   Full → dropped 计数。这是"热路径零阻塞、事件管线近零开销"承诺的实现基础
+（真机实测：margin-off +2.0%，见 VALIDATION_LOG）
 2. **daemon 线程 + q.get(timeout=1s)**：定时 flush 必须由 get 的
    timeout 触发，而不是"收到事件时检查时间"——否则事件流尾部
    （<32 行且 1s 内结束的请求序列）永远不 flush，文件 0 字节
@@ -119,8 +120,9 @@ run_id 必须在 vLLM fork/spawn 子进程**之前**导出 env，否则各进程
 ### 8.1 execute_model 计时
 
 wrapper 先调 orig 再计时——**只测原调用耗时，不计 hook 自身**。
-batch 组成从 `self.input_batch` 提取（num_tokens/num_seqs），
-scheduler_output 的 token 数一并记录，供与 schedule 事件对拍。
+batch 组成（num_tokens/num_seqs）优先从 `scheduler_output.num_scheduled_tokens`
+取（真机发现 `self.input_batch` 数组执行后即重置）；`input_batch` 保留作兜底，
+`total_num_scheduled_tokens` 与 schedule 事件对拍。
 
 ### 8.2 sampler margin 探针（最值得精读的部分）
 
@@ -144,8 +146,11 @@ temp=0 → logits.argmax(dim=-1)（采样确定）
 5. **wrapper 内运行时再查 cfg.margin**：共享类残留时也能关闭
 6. **整体 try/except**：观测失败绝不破坏采样
 
-**开销账**：decode 步 ms 级，一次 topk(2) + 一次标量同步 <1%。
-`VLLM_SNIFFER_MARGIN=0` 完全关闭（安装时就不 patch）。
+**开销账**：设计上 decode 步 ms 级、一次 topk(2) + 一次标量同步可忽略；
+2026-08-09 真机实测（0.5B/V100）：事件管线 ≈0（margin-off +2.0%），margin 探针
+**−21.7%**（topk 只随 vocab 规模，大模型/大 batch 相对成本显著下降，待 A100/H100）。
+`VLLM_SNIFFER_MARGIN=0` 完全关闭（安装时就不 patch）。——这是"真实数字"的
+唯一来源（VALIDATION_LOG §3/§10），讲开销时必须按配置区分，勿再说"<1%"。
 
 ## 9. 测试策略：`tests/`
 
@@ -163,6 +168,10 @@ temp=0 → logits.argmax(dim=-1)（采样确定）
 - `offline_smoke.py` / `offline_smoke_cudagraph.py`：offline 冒烟
 - `online_smoke.py`：httpx 流式 + `stream_then_abort` 场景
   （读几个 chunk 断开 → 验证 abort 双路径）
+- `exp_determinism.py`：同 prompt × N、temp=0 输出一致性（逐位置 diff + 唯一序列）
+- `exp_logits_fp.py`：P1-1 两臂对拍（solo vs mixed，子进程 env 隔离防串台）
+- `exp_overhead.py`：三臂开销量化（baseline / margin-off / margin-on）
+- 真机验证记录与命令见 [VALIDATION_LOG.md](VALIDATION_LOG.md) §10
 
 ## 11. 推荐对照阅读的 vLLM 源码（v0.19.1）
 

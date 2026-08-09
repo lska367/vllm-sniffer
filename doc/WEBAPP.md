@@ -87,7 +87,7 @@ Base: `http://127.0.0.1:<port>`。所有接口只读、无鉴权（内网分析�
             "top1": 1234, "top2": 5678}]}
 ```
 
-`step` 可能为 `null`（worker 侧尚未带 step 关联），前端按事件序号分桶。
+`step` 取自事件字段（2026-08-09 起 worker 事件经进程内 `step_counter` 已带迭代号，TP=1 时非 null）；`null` 仅出现在 TP>1 的独立 worker 进程（待 rank 关联），前端此时按事件序号分桶。
 
 ### `GET /api/runs/{run_id}/scatter`
 
@@ -118,4 +118,4 @@ Base: `http://127.0.0.1:<port>`。所有接口只读、无鉴权（内网分析�
 - ✅ 打开页面 → 选 run_id → 四张图（时间线/step 序列/flip 热图/散点）
 - ✅ 聚合接口本文档登记（§2/§3）
 - ✅ 合成数据端到端测试（tests/test_webapp.py，10 个用例）
-- ⏳ 真机数据演示待 GPU 环境复跑（见 VALIDATION_LOG）
+- ✅ 真机演示（2026-08-09，V100）：9 个 run 可列、四视图数据源全通（见 VALIDATION_LOG §2/§10）

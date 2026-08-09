@@ -74,7 +74,7 @@ parquet 往返与缺 pyarrow 的友好报错）。
 
 **验收**：✅ `export_parquet.py <run_id> && latency_report.py <parquet>` 输出
 真实数字；repro_compare 能从真实数据复现 flip 发现。
-（合成数据测试全绿；真机数据待 GPU 环境复跑——见 VALIDATION_LOG 待补项。）
+（合成数据测试全绿；2026-08-09 真机复跑通过——见 VALIDATION_LOG §2/§10）
 
 ### P0-3 开源门面（低成本高回报）
 
@@ -93,7 +93,7 @@ parquet 往返与缺 pyarrow 的友好报错）。
 ### P0-4 CI + 覆盖率
 
 GitHub Actions：`uv venv + pytest`（CPU 即可，测试不依赖 GPU/vLLM），
-附 pytest-cov 报告。35 个测试 + 全绿 badge 是工程规范感的直接证据。
+附 pytest-cov 报告。90 个测试 + 全绿 badge 是工程规范感的直接证据。
 
 ---
 
@@ -123,7 +123,9 @@ GitHub Actions：`uv venv + pytest`（CPU 即可，测试不依赖 GPU/vLLM）�
 **验收**：✅（合成数据）能区分"同 batch 内差异（≈0）"——identical run 对拍
 VERDICT=IDENTICAL、total bit delta=0；vs"换 batch 组成后差异（低位噪声）"——
 尾数位差异 100% 集中，VERDICT=LOW-BIT NOISE，差异位分布图（ASCII）可产出。
-真机数据待 GPU 环境复跑（见 VALIDATION_LOG 待补项）。
+**2026-08-09 真机验收达成**（V100）：solo-vs-solo 63 事件/287 行 IDENTICAL Δ=0
+（同 batch 位级确定）；solo-vs-mixed LOW-BIT NOISE 92.4% 差异在尾数位 13..22
+（batch 组成 → 数值路径抖动）——见 VALIDATION_LOG §10。
 
 ### P1-2 repro 对拍：temp=0 复现实验
 
@@ -170,7 +172,8 @@ step 耗时序列、flip 分布热图、batch 组成 vs 耗时的散点。
 - 测试：`tests/test_webapp.py`（10 个：列表/四视图/404/路径穿越/parquet/首页）
 
 **验收**：✅ 打开页面 → 选 run_id → 看到四张图（合成数据端到端验证）；
-聚合接口有文档（doc/WEBAPP.md §2/§3）。真机数据演示待 GPU 环境复跑。
+聚合接口有文档（doc/WEBAPP.md §2/§3）。**2026-08-09 真机演示通过**：
+9 个 run 可列、四视图数据源全通（见 VALIDATION_LOG §10）。
 
 ### P2-2 多卡 TP/PP + Ray
 
@@ -193,7 +196,8 @@ JSONL 是默认实现；OTLP sink 按 batch 推送。接口设计先行，实现
 
 1. ✅ **本周**：P0-1（env_snapshot）+ P0-2（分析工具 v0）——2026-08-09 完成
 2. ✅ P0-3（开源门面）+ P0-4（CI）——2026-08-09 就位（README 英文版待补）
-3. ✅ **P1-1 logits 位级指纹 + P2-1 可视化前端**——2026-08-09 完成（合成数据全绿）
+3. ✅ **P1-1 logits 位级指纹 + P2-1 可视化前端**——2026-08-09 完成
+   （合成数据全绿；2026-08-09 真机：P1-1 真机验收达成、webapp 四视图全通）
 4. **之后**：P1-3 净化 → P1-2 复现实验（等 GPU 环境，脚本已备：
    `scripts/exp_determinism.py` / `scripts/exp_logits_fp.py`）→ OTLP → 多卡
 

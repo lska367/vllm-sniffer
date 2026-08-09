@@ -10,7 +10,7 @@
 uv venv .venv
 uv pip install --python .venv/bin/python pytest msgspec torch \
     --index-url https://download.pytorch.org/whl/cpu
-.venv/bin/python -m pytest -q        # 35 tests
+.venv/bin/python -m pytest -q        # 90 tests
 
 # 真机验证环境（GPU）
 uv venv .venv-gpu
