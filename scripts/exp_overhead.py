@@ -73,8 +73,9 @@ def run_config(args, env: dict[str, str], label: str) -> dict:
         return {"label": label, "error": proc.stderr[-500:]}
     tokens = secs = None
     for line in proc.stdout.splitlines():
-        if line.startswith("TOKENS "):
-            _, t, s = line.split()
+        # workload prints: "TOKENS <n> SECS <t>" (4 fields)
+        if line.startswith("TOKENS ") and len(line.split()) == 4:
+            _, t, _, s = line.split()
             tokens, secs = int(t), float(s)
     if tokens is None:
         return {"label": label, "error": f"unparsable stdout: {proc.stdout[-300:]}"}

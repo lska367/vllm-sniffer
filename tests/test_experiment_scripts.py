@@ -47,6 +47,24 @@ def test_exp_overhead_imports_and_workload_compiles():
     assert len(mod.main.__code__.co_consts) > 0
 
 
+def test_exp_overhead_parses_tokens_line(monkeypatch):
+    """run_config parses the workload's 'TOKENS <n> SECS <t>' line (4 fields;
+    real-machine 2026-08-09: the old 3-field unpack always crashed)."""
+    mod = _load("exp_overhead", ROOT / "scripts" / "exp_overhead.py")
+
+    class FakeProc:
+        returncode = 0
+        stdout = "TOKENS 1024 SECS 0.589"
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: FakeProc())
+    args = mod.build_parser().parse_args(["--n", "16", "--max-tokens", "64"])
+    r = mod.run_config(args, {}, "t")
+    assert r["tokens"] == 1024
+    assert abs(r["secs"] - 0.589) < 1e-9
+    assert abs(r["tps"] - 1024 / 0.589) < 1e-6
+
+
 def test_all_scripts_and_tools_compile():
     for sub in ("scripts", "tools"):
         for f in sorted((ROOT / sub).glob("*.py")):
