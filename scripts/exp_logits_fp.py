@@ -5,27 +5,50 @@ prompt is served in different batch compositions? The tracer's deep-dive
 mode (VLLM_SNIFFER_LOGITS_FP=1) records per-step bit-level fingerprints of
 the raw logits; this script runs a controlled A/B:
 
-- Run A ("solo"): the probe prompt alone in the batch (batch size 1).
-- Run B ("mixed"): the probe prompt alongside N-1 filler prompts, so the
+- Arm "solo": the probe prompt alone in the batch (batch size 1).
+- Arm "mixed": the probe prompt alongside N-1 filler prompts, so the
   kernel paths / GEMM shapes differ at the probe's row.
 
-The two runs are then compared with tools/logits_fp_compare.py: a solo-vs-
-solo control should be IDENTICAL (~0 bit delta), solo-vs-mixed typically
-shows low-bit (mantissa) noise -- the "diff-bit distribution chart".
+Each arm runs in its own subprocess (env isolation -- required: a forked
+engine process inherits the parent's cached VLLM_SNIFFER_DIR, so two arms
+in one process would write both into the first arm's run dir; 2026-08-09
+real-machine finding). The two runs are then compared with
+tools/logits_fp_compare.py:
+
+- control: solo vs solo  -> expect IDENTICAL (bit delta = 0)
+- hypothesis: solo vs mixed -> typically LOW-BIT NOISE (mantissa bits)
 
 Usage (GPU machine with vLLM installed, e.g. .venv-gpu):
     .venv-gpu/bin/python scripts/exp_logits_fp.py --n 8 --max-tokens 32
-
-Events land in <out_dir>/exp-logits-fp-*/ (one run dir per arm) and the
-compare report is printed at the end.
 """
 
 from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import os
+import subprocess
 import sys
+
+# Runs in a fresh subprocess per arm. vLLM is imported only here, so the
+# plugin's load() picks up the arm's VLLM_SNIFFER_DIR from the env passed
+# by the parent. Prints "DONE <n>" on success.
+ARM_WORKLOAD = r"""
+import json, sys
+
+model, prompts_json, max_tokens, gpu_mem = sys.argv[1:5]
+prompts = json.loads(prompts_json)
+max_tokens, gpu_mem = int(max_tokens), float(gpu_mem)
+
+from vllm import LLM, SamplingParams
+
+llm = LLM(model=model, max_model_len=2048, gpu_memory_utilization=gpu_mem)
+outs = llm.generate(prompts, sampling_params=SamplingParams(
+    temperature=0, max_tokens=max_tokens))
+print(f"DONE {len(outs)}")
+sys.stdout.flush()
+"""
 
 
 def _default_probe() -> str:
@@ -56,32 +79,44 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_arm(args, tag: str, prompts: list[str]) -> str:
+    """Run one arm in a subprocess; return its sniffer run directory."""
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     sniffer_dir = os.path.join(args.out_dir, f"exp-logits-fp-{tag}-{ts}")
-    os.environ["VLLM_SNIFFER_DIR"] = sniffer_dir
-    os.environ["VLLM_SNIFFER_LOGITS_FP"] = "1"
-
-    from vllm import LLM, SamplingParams
-
-    llm = LLM(
-        model=args.model,
-        max_model_len=2048,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-    )
-    params = SamplingParams(temperature=0, max_tokens=args.max_tokens)
-    llm.generate(prompts, sampling_params=params)
+    env = os.environ.copy()
+    # Scrub tracer state that would otherwise leak into the child (a forked
+    # engine process would inherit the parent's cached config/run_id).
+    for k in list(env):
+        if k.startswith("VLLM_SNIFFER"):
+            env.pop(k)
+    env["VLLM_SNIFFER_DIR"] = sniffer_dir
+    env["VLLM_SNIFFER_LOGITS_FP"] = "1"
+    cmd = [
+        sys.executable, "-c", ARM_WORKLOAD,
+        args.model, json.dumps(prompts, ensure_ascii=False),
+        str(args.max_tokens), str(args.gpu_memory_utilization),
+    ]
+    proc = subprocess.run(cmd, env=env, capture_output=True, text=True,
+                          timeout=3600)
+    if proc.returncode != 0 or "DONE" not in proc.stdout:
+        tail = (proc.stderr or proc.stdout)[-500:]
+        raise RuntimeError(
+            f"arm {tag} failed (exit {proc.returncode}): {tail}"
+        )
     print(f"arm {tag}: {len(prompts)} greedy request(s) -> {sniffer_dir}")
     return sniffer_dir
+
+
+def compare(label: str, a: str, b: str) -> None:
+    print(f"\n== {label} ==")
+    subprocess.run(
+        [sys.executable, "tools/logits_fp_compare.py", a, b, "--align", "index"],
+        timeout=300,
+    )
 
 
 def main() -> int:
     args = build_parser().parse_args()
     probe = args.probe_prompt or _default_probe()
-    # Restore our env changes on every exit path: the script is also
-    # importable in-process (tests), and leaked VLLM_SNIFFER_* vars would
-    # poison later runs in the same process.
-    _saved = {k: os.environ.get(k)
-              for k in ("VLLM_SNIFFER_DIR", "VLLM_SNIFFER_LOGITS_FP")}
     try:
         # Arm A: probe alone (batch composition = 1 row).
         solo_dir = run_arm(args, "solo", [probe])
@@ -89,27 +124,15 @@ def main() -> int:
         # paths the probe's row goes through).
         mixed = [probe] + [_default_filler(i) for i in range(args.n - 1)]
         mixed_dir = run_arm(args, "mixed", mixed)
-    except ImportError as e:
-        print(f"error: this experiment needs a GPU environment with vLLM "
-              f"installed (e.g. .venv-gpu): {e}", file=sys.stderr)
+    except Exception as e:
+        print(f"error: {e}", file=sys.stderr)
+        print("this experiment needs a GPU environment with vLLM installed "
+              "(e.g. .venv-gpu)", file=sys.stderr)
         return 2
-    finally:
-        for k, v in _saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
 
-    print("\n== control: solo vs solo (expect ~IDENTICAL) ==")
-    os.system(
-        f"{sys.executable} tools/logits_fp_compare.py {solo_dir} {solo_dir} "
-        f"--align index"
-    )
-    print("\n== hypothesis: solo vs mixed (expect low-bit noise) ==")
-    os.system(
-        f"{sys.executable} tools/logits_fp_compare.py {solo_dir} {mixed_dir} "
-        f"--align index"
-    )
+    compare("control: solo vs solo (expect ~IDENTICAL)", solo_dir, solo_dir)
+    compare("hypothesis: solo vs mixed (expect low-bit noise)",
+            solo_dir, mixed_dir)
     print(f"\nrun dirs: {solo_dir}\n          {mixed_dir}")
     return 0
 

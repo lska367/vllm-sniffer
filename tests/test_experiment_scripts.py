@@ -11,6 +11,7 @@ neither, so tests here only verify that:
 import ast
 import importlib.util
 import py_compile
+import subprocess
 import sys
 from pathlib import Path
 
@@ -62,19 +63,43 @@ def test_exp_logits_fp_imports_and_parses_args():
     assert mod._default_filler(0)
 
 
-def test_exp_logits_fp_requires_vllm_only_at_runtime(tmp_path, monkeypatch):
-    """Without vLLM, the experiment exits with code 2 and a hint."""
+def test_exp_logits_fp_arm_env_scrubbed(monkeypatch):
+    """run_arm scrubs inherited VLLM_SNIFFER_* vars before setting its own
+    (forked engine processes would otherwise inherit the parent's config)."""
     mod = _load("exp_logits_fp", ROOT / "scripts" / "exp_logits_fp.py")
-    import builtins
+    ast.parse(mod.ARM_WORKLOAD)  # embedded workload stays valid Python
+    captured = {}
 
-    real_import = builtins.__import__
+    class FakeProc:
+        returncode = 0
+        stdout = "DONE 1"
+        stderr = ""
 
-    def fake_import(name, *a, **kw):
-        if name == "vllm" or name.startswith("vllm."):
-            raise ImportError("No module named 'vllm'")
-        return real_import(name, *a, **kw)
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        captured["env"] = kw.get("env", {})
+        return FakeProc()
 
-    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("VLLM_SNIFFER", "1")
+    monkeypatch.setenv("VLLM_SNIFFER_DIR", "/tmp/inherited")
+    args = mod.build_parser().parse_args(["--n", "2"])
+    d = mod.run_arm(args, "solo", ["hi"])
+    assert captured["env"]["VLLM_SNIFFER_DIR"] == d
+    assert captured["env"]["VLLM_SNIFFER_LOGITS_FP"] == "1"
+    assert "VLLM_SNIFFER" not in captured["env"]  # inherited vars scrubbed
+
+
+def test_exp_logits_fp_arm_failure_exits_2(monkeypatch):
+    """An arm subprocess failing (e.g. no vLLM installed) exits 2 with a hint."""
+    mod = _load("exp_logits_fp", ROOT / "scripts" / "exp_logits_fp.py")
+
+    class FakeProc:
+        returncode = 1
+        stdout = ""
+        stderr = "ModuleNotFoundError: No module named 'vllm'"
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: FakeProc())
     monkeypatch.setattr(sys, "argv", ["exp_logits_fp.py", "--n", "2"])
     assert mod.main() == 2
 
