@@ -148,6 +148,60 @@ def test_execute_model_forward_event(monkeypatch, read_events):
     assert fwd["data"]["dur_ns"] >= 0
 
 
+def test_forward_num_seqs_from_scheduler_output(monkeypatch, read_events):
+    """Batch composition falls back to scheduler_output.num_scheduled_tokens
+    (the real-vLLM path: input_batch arrays reset after execution)."""
+    mod = fake_vllm_module(monkeypatch, "vllm.v1.worker.gpu_model_runner")
+
+    class FakeModelRunner:
+        def execute_model(self, scheduler_output, intermediate_tensors=None):
+            return "result"
+
+    mod.GPUModelRunner = FakeModelRunner
+    install_worker_hooks()
+
+    sched_out = SimpleNamespace(
+        total_num_scheduled_tokens=100,
+        num_scheduled_tokens={"r1": 60, "r2": 40},
+    )
+    FakeModelRunner().execute_model(sched_out)
+
+    fwd = [e for e in read_events() if e["type"] == "forward"][0]
+    assert fwd["data"]["total_num_scheduled_tokens"] == 100
+    assert fwd["data"]["num_seqs"] == 2
+
+
+def test_worker_events_carry_current_step(monkeypatch, read_events):
+    """forward / sample_flip / sample_stats carry the engine step index
+    (shared process-local counter; TP=1 runs model in the engine process)."""
+    from vllm_sniffer.core.step_counter import next_step
+
+    mod = fake_vllm_module(monkeypatch, "vllm.v1.worker.gpu_model_runner")
+
+    class FakeModelRunner:
+        def execute_model(self, scheduler_output, intermediate_tensors=None):
+            return "result"
+
+    mod.GPUModelRunner = FakeModelRunner
+    install_worker_hooks()
+
+    next_step()  # engine iteration 1 in progress
+    sched_out = SimpleNamespace(
+        total_num_scheduled_tokens=19,
+        num_scheduled_tokens={"r1": 19},
+    )
+    FakeModelRunner().execute_model(sched_out)
+    events = read_events()
+    fwd = [e for e in events if e["type"] == "forward"][0]
+    assert fwd["step"] == 1
+    # sampler events (same iteration)
+    Sampler = _install_sampler(monkeypatch)
+    Sampler.greedy_sample(_logits_with_one_flip())
+    events = read_events()
+    assert all(e["step"] == 1 for e in events if e["type"] in
+               ("sample_flip", "sample_stats"))
+
+
 def test_execute_model_missing_batch_graceful(monkeypatch, read_events):
     mod = fake_vllm_module(monkeypatch, "vllm.v1.worker.gpu_model_runner")
 

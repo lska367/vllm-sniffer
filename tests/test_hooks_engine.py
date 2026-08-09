@@ -27,8 +27,55 @@ def test_step_event(monkeypatch, read_events):
     step_events = [e for e in events if e["type"] == "step"]
     assert len(step_events) == 1
     assert step_events[0]["group"] == "core"
+    assert step_events[0]["step"] == 1
     assert step_events[0]["data"]["n_outputs"] == 3
     assert step_events[0]["data"]["dur_ns"] >= 0
+
+
+def test_step_event_monotonic_index(monkeypatch, read_events):
+    """Consecutive iterations carry 1, 2, 3 (per-process counter)."""
+    mod = fake_vllm_module(monkeypatch, "vllm.v1.engine.core")
+
+    class FakeEngineCore:
+        def step(self):
+            return _fake_outputs(1), False
+
+    mod.EngineCore = FakeEngineCore
+    install_engine_hooks()
+
+    ec = FakeEngineCore()
+    ec.step()
+    ec.step()
+    ec.step()
+
+    steps = [e["step"] for e in read_events() if e["type"] == "step"]
+    assert steps == [1, 2, 3]
+
+
+def test_schedule_carries_current_step(monkeypatch, read_events):
+    """schedule events are tagged with the running step's index."""
+    from vllm_sniffer.core.step_counter import next_step
+
+    mod = fake_vllm_module(monkeypatch, "vllm.v1.core.sched.scheduler")
+
+    class FakeScheduler:
+        def schedule(self):
+            return SimpleNamespace(
+                preempted_req_ids=None,
+                total_num_scheduled_tokens=10,
+                num_scheduled_tokens={"r3": 10},
+                finished_req_ids=set(),
+                new_block_ids_to_zero=None,
+            )
+
+    mod.Scheduler = FakeScheduler
+    install_engine_hooks()
+
+    next_step()  # the engine iteration this schedule call belongs to
+    FakeScheduler().schedule()
+
+    sched = [e for e in read_events() if e["type"] == "schedule"][0]
+    assert sched["step"] == 1
 
 
 def test_schedule_with_preemption(monkeypatch, read_events):

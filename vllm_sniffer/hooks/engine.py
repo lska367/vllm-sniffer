@@ -23,6 +23,7 @@ from typing import Any
 
 from ..config import get_config
 from ..core.event import GROUP_CORE, make_event
+from ..core.step_counter import current_step, next_step
 from ..core.writer import emit
 from . import is_our_wrapper, mark_wrapper
 
@@ -60,6 +61,10 @@ def install_engine_core_step_hook() -> bool:
 
     def _make_step_wrapper(orig):
         def step_wrapper(self, *args, **kwargs):
+            # The iteration index must be fixed *before* the body runs:
+            # schedule/worker hooks fire inside this call and read
+            # current_step() to tag their events with the same number.
+            step = next_step()
             t0 = time.monotonic_ns()
             try:
                 result = orig(self, *args, **kwargs)
@@ -76,7 +81,7 @@ def install_engine_core_step_hook() -> bool:
                     except Exception:
                         pass
                 data["n_outputs"] = n_outputs
-                emit(make_event(GROUP_CORE, "step", data=data))
+                emit(make_event(GROUP_CORE, "step", step=step, data=data))
             except Exception:
                 pass
             return result
@@ -121,12 +126,14 @@ def install_scheduler_hook() -> bool:
             cfg = get_config()
             # Preemption events: never sampled, low frequency.
             preempted = getattr(out, "preempted_req_ids", None) or set()
+            step = current_step()
             for req_id in preempted:
                 emit(
                     make_event(
                         GROUP_CORE,
                         "preempt",
                         req_id=req_id,
+                        step=step,
                         data={"mode": "recompute"},
                     )
                 )
@@ -154,7 +161,7 @@ def install_scheduler_hook() -> bool:
                 data["n_preempted"] = len(preempted)
                 emit(
                     make_event(
-                        GROUP_CORE, "schedule", sampled=True, data=data
+                        GROUP_CORE, "schedule", sampled=True, step=step, data=data
                     )
                 )
         except Exception:

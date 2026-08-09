@@ -44,6 +44,7 @@ from typing import Any
 
 from ..config import get_config
 from ..core.event import GROUP_WORKER, make_event
+from ..core.step_counter import current_step
 from ..core.writer import emit
 from . import is_our_wrapper, mark_wrapper
 
@@ -85,12 +86,22 @@ def install_execute_model_hook() -> bool:
         dur_ns = time.monotonic_ns() - t0
         try:
             cfg = get_config()
+            step = current_step()
             if _should_sample(cfg):
                 data: dict[str, Any] = {"dur_ns": dur_ns}
                 try:
                     data["total_num_scheduled_tokens"] = (
                         scheduler_output.total_num_scheduled_tokens
                     )
+                except Exception:
+                    pass
+                # Batch composition: prefer the scheduler output (the
+                # input_batch arrays are reset right after execution on
+                # real vLLM, so self.input_batch reads may fail there).
+                try:
+                    nst = scheduler_output.num_scheduled_tokens
+                    if isinstance(nst, dict):
+                        data["num_seqs"] = len(nst)
                 except Exception:
                     pass
                 try:
@@ -104,7 +115,11 @@ def install_execute_model_hook() -> bool:
                         data["num_seqs"] = num_seqs
                 except Exception:
                     pass
-                emit(make_event(GROUP_WORKER, "forward", sampled=True, data=data))
+                emit(
+                    make_event(
+                        GROUP_WORKER, "forward", sampled=True, step=step, data=data
+                    )
+                )
         except Exception:
             pass
         return result
@@ -216,6 +231,7 @@ def install_sampler_margin_hook() -> bool:
         if not (cfg.margin or cfg.logits_fp):
             return sampled
         try:
+            step = current_step()
             if cfg.margin:
                 top2v, top2i = torch.topk(logits, 2, dim=-1)
                 margin = top2v[:, 0] - top2v[:, 1]  # [B] float32, on GPU
@@ -234,6 +250,7 @@ def install_sampler_margin_hook() -> bool:
                             make_event(
                                 GROUP_WORKER,
                                 "sample_flip",
+                                step=step,
                                 data={
                                     "margin": m,
                                     "top1": tok1,
@@ -247,6 +264,7 @@ def install_sampler_margin_hook() -> bool:
                             GROUP_WORKER,
                             "sample_stats",
                             sampled=True,
+                            step=step,
                             data={
                                 "n_greedy": int(margin.numel()),
                                 "margin_min": float(margin.min().item()),
@@ -271,6 +289,7 @@ def install_sampler_margin_hook() -> bool:
                             GROUP_WORKER,
                             "logits_fp",
                             sampled=True,
+                            step=step,
                             data=fp_data,
                         )
                     )
