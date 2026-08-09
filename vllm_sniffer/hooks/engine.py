@@ -73,14 +73,21 @@ def install_engine_core_step_hook() -> bool:
             dur_ns = time.monotonic_ns() - t0
             try:
                 data: dict[str, Any] = {"dur_ns": dur_ns}
-                outputs, _ = result
-                n_outputs = 0
-                for engine_outputs in outputs.values():
-                    try:
-                        n_outputs += len(engine_outputs.outputs)
-                    except Exception:
-                        pass
-                data["n_outputs"] = n_outputs
+                try:
+                    outputs, _ = result
+                    n_outputs = 0
+                    for engine_outputs in (outputs or {}).values():
+                        try:
+                            n_outputs += len(engine_outputs.outputs)
+                        except Exception:
+                            pass
+                    data["n_outputs"] = n_outputs
+                except Exception:
+                    # Batch-queue mode returns (None, False) on iterations
+                    # that only schedule a new batch (outputs arrive in a
+                    # later iteration). Keep the heartbeat event: dur_ns +
+                    # step index are still valid; n_outputs stays unset.
+                    pass
                 emit(make_event(GROUP_CORE, "step", step=step, data=data))
             except Exception:
                 pass

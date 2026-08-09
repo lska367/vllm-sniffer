@@ -151,3 +151,23 @@ def test_step_exception_propagates(monkeypatch, read_events):
         raised = True
     assert raised
     assert read_events() == []  # nothing recorded for the failed step
+
+
+def test_step_event_on_none_outputs(monkeypatch, read_events):
+    """Batch-queue iterations returning (None, ...) still emit the heartbeat
+    (real vLLM 2026-08-09: schedule-only iterations return None outputs)."""
+    mod = fake_vllm_module(monkeypatch, "vllm.v1.engine.core")
+
+    class FakeEngineCore:
+        def step_with_batch_queue(self):
+            return None, False  # new batch scheduled, outputs next iter
+
+    mod.EngineCore = FakeEngineCore
+    install_engine_hooks()
+
+    FakeEngineCore().step_with_batch_queue()
+
+    steps = [e for e in read_events() if e["type"] == "step"]
+    assert len(steps) == 1
+    assert steps[0]["step"] == 1
+    assert "n_outputs" not in steps[0]["data"]
