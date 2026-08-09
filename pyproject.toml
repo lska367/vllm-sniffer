@@ -12,6 +12,13 @@ dependencies = [
     "msgspec>=0.18",
 ]
 
+[project.optional-dependencies]
+# Analysis tools (tools/): parquet export needs pyarrow; the rest is pure
+# stdlib + msgspec.
+analyze = [
+    "pyarrow>=14",
+]
+
 [project.entry-points."vllm.general_plugins"]
 # vLLM loads this entry point automatically at import time in every process
 # (API server, engine core, GPU workers). The loaded function must be

@@ -25,13 +25,16 @@ def reset_state(tmp_path, monkeypatch):
     writer_mod.close_writer()
     # Reset hook bookkeeping so per-test installs never leak across tests.
     from vllm_sniffer.hooks import api, engine, worker
+    from vllm_sniffer.core import env_snapshot
 
     api._installed.clear()
     engine._installed.clear()
     worker._installed.clear()
+    env_snapshot._emitted = False
     yield
     writer_mod.close_writer()
     get_config.cache_clear()
+    env_snapshot._emitted = False
 
 
 def fake_vllm_module(monkeypatch, path: str) -> types.ModuleType:
@@ -57,8 +60,9 @@ def fake_vllm_module(monkeypatch, path: str) -> types.ModuleType:
                 monkeypatch.setattr(parent, parts[i - 1], mod, raising=False)
     leaf = types.ModuleType(path)
     monkeypatch.setitem(sys.modules, path, leaf)
-    parent = sys.modules[".".join(parts[:-1])]
-    monkeypatch.setattr(parent, parts[-1], leaf, raising=False)
+    if len(parts) > 1:
+        parent = sys.modules[".".join(parts[:-1])]
+        monkeypatch.setattr(parent, parts[-1], leaf, raising=False)
     return leaf
 
 

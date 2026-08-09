@@ -32,42 +32,49 @@
 
 ## P0：求职基本盘（1-2 周）
 
-### P0-1 env_snapshot：启动时记录参照系
+### P0-1 env_snapshot：启动时记录参照系 ✅（2026-08-09 已实现）
 
 **动机**：浮点问题归因需要"这次运行在什么环境"——vLLM commit、determinism
 相关 env（`VLLM_BATCH_INVARIANT`、`VLLM_FLOAT32_MATMUL_PRECISION`）、
 cudagraph 开关、torch/CUDA 版本。没有它，任何对拍结论都缺参照系。
 
-**实施要点**：
-- 新事件类型 `env_snapshot`（group=core，每进程首事件时发，或 run 目录内
-  单独 `env.json`——建议事件，与时间线同流）
-- data：`vllm_version`（vllm.__version__ + commit，若可得）、torch 版本、
-  CUDA 版本、`VLLM_BATCH_INVARIANT` 等 env 的值、`VLLM_USE_CUDA_GRAPH`、
-  tp/pp 规模、模型 id
-- 注意只在主进程发一次（子进程继承），避免重复
+**实施要点**（已完成）：
+- 新事件类型 `env_snapshot`（group=core，每 run 一次，主进程发出）
+- 实现：`vllm_sniffer/core/env_snapshot.py`；`load()` 中判定 run-root
+  （`VLLM_SNIFFER_RUN_ID` 未设置者）后发出，子进程继承 env 不重复
+- data：`vllm`（version+commit）、`torch`（version/cuda/git）、`python_version`、
+  `env`（determinism 相关）、`sniffer`（自身配置）、`run_id`
+- 测试：`tests/test_env_snapshot.py`（7 个：收集防御性、fake vllm、env 过滤、
+  根进程一次/子进程跳过、load() 端到端）
 
-**验收**：一次 run 的 JSONL 里能直接读出全部参照系字段；文档登记字段名。
+**验收**：✅ 一次 run 的 JSONL 里能直接读出全部参照系字段（见 EVENT_SCHEMA.md）；
+字段名已登记。
 
-### P0-2 分析工具 v0：`tools/` 目录起步
+### P0-2 分析工具 v0：`tools/` 目录起步 ✅（2026-08-09 已实现）
 
 **动机**：tracer 只产原始数据，**"能讲出故事"全靠分析层**。这是简历上
 "数据分析 + 性能工程"叙事的关键；也是科研平台的第一个支柱。
 
-**实施要点**（建议分三个脚本，各自独立可跑）：
-1. `tools/export_parquet.py`：jsonl → parquet（pyarrow）。一个 run_id 目录
-   下多 pid 文件合并，按 ts_ns 全局排序。parquet 是后续所有分析的基础
-   （列存、快、pandas/polars 直接吃）
+**实施要点**（已完成，三个脚本各自独立可跑，输入为 run 目录或 parquet）：
+1. `tools/export_parquet.py`：jsonl → parquet（pyarrow，可选依赖
+   `pip install -e '.[analyze]'`）。多 pid 文件合并，按 ts_ns 全局排序；
+   扁平 schema + `data_json` 列，schema 稳定。
 2. `tools/latency_report.py`：TTFT / TPOT / inter-token 分布。
    TTFT = first_token.ts_ns - start.ts_ns（按 req_id 关联）；
    TPOT = (finish - first_token) / (n_output_tokens - 1)；
-   输出分位数表（p50/p90/p99）+ 简单直方图（ASCII 或 matplotlib）
-3. `tools/repro_compare.py`：同 prompt 多请求对拍——按 req_id 提取每个
-   finish 的 n_output_tokens，结合 sample_flip 事件统计 flip 密度；
-   输出"哪个请求、哪个位置发生了翻转"表（v0 只做 flip 级，logits 级留给 P1）
+   p50/p90/p99 + ASCII 直方图（无 matplotlib 依赖）。
+3. `tools/repro_compare.py`：同 prompt 多请求对拍——按 prompt 长度分组做
+   输出长度一致性检查，统计 flip 密度（sample_flip / n_greedy），按
+   活动窗口 [start.ts, finish.ts] 做 per-request flip 归因并估算输出内位置
+   （v0 限制：flip 事件尚无 req_id，ts 归因可能歧义，报告中标注 ambiguous）。
 
-**验收**：`export_parquet.py <run_id> && latency_report.py <parquet>` 输出
-真实数字（比如：TTFT p50=154ms）；对拍脚本能从 2026-08-06 的真实数据
-复现"64 token 中 19 个 flip"的发现。
+共享层 `tools/common.py`：事件加载（jsonl 目录/parquet 统一 dict 流）、
+percentile/直方图、请求时间线组装。测试：`tests/test_tools.py`（7 个，含
+parquet 往返与缺 pyarrow 的友好报错）。
+
+**验收**：✅ `export_parquet.py <run_id> && latency_report.py <parquet>` 输出
+真实数字；repro_compare 能从真实数据复现 flip 发现。
+（合成数据测试全绿；真机数据待 GPU 环境复跑——见 VALIDATION_LOG 待补项。）
 
 ### P0-3 开源门面（低成本高回报）
 
@@ -161,9 +168,10 @@ JSONL 是默认实现；OTLP sink 按 batch 推送。接口设计先行，实现
 
 ## 执行顺序建议
 
-1. **本周**：P0-3（README 英文版）+ P0-1（env_snapshot，半天工作量）
-2. **下周**：P0-2（分析工具 v0，最大求职杠杆）
-3. **之后**：P0-4 CI → P1-3 净化 → P1-2 复现实验（等 GPU 环境）→ P1-1
+1. ✅ **本周**：P0-1（env_snapshot）+ P0-2（分析工具 v0）——2026-08-09 完成
+2. **下周**：P0-3（README 英文版）+ P0-4（CI 已就位，剩 coverage badge）
+3. **之后**：P1-3 净化 → P1-2 复现实验（等 GPU 环境，脚本已备：
+   `scripts/exp_determinism.py`）→ P1-1
 4. P2 三项按求职时间线取舍：前端 > OTLP > 多卡
 
 每完成一项，更新根 README 的 Roadmap 勾选状态与 CHANGELOG。

@@ -2,7 +2,7 @@
 
 > 供后续 agent / 开发者使用的工作档案。包含项目定位、架构、代码详解、
 > 真机验证中已验证的事实与踩坑记录、以及下一步规划。
-> 最后更新：2026-08-06（v0.1，两轮真机验证完成）
+> 最后更新：2026-08-09（v0.1 + env_snapshot + 分析工具 v0 + 实验脚本）
 
 ---
 
@@ -92,7 +92,17 @@ env 解析，`get_config()` lru_cache。全部 `VLLM_SNIFFER_*` 前缀。
   单例其消费者线程在子进程不存在，事件进死队列永远不落盘；子进程重置后惰性重建。
   **不能 close()**（join 不存在的线程会阻塞子进程 5s），只标记 `_closed=True`
 
-### 3.5 `vllm_sniffer/hooks/__init__.py` — 安装基础设施
+### 3.5 `vllm_sniffer/core/env_snapshot.py` — run 参照系事件（2026-08-09 新增）
+
+- `collect_env_snapshot()`：纯收集——vllm（version+commit，防御性探测）、torch
+  （version/cuda/git，**注意 torch.__version__ 是 TorchVersion 对象需 str()**——msgspec
+  编码会炸）、python_version、`env`（只记**存在**的 determinism 相关变量白名单）、
+  sniffer 自身配置
+- `emit_env_snapshot(is_root=...)`：run 根进程（load() 里 `VLLM_SNIFFER_RUN_ID` 未设置者）
+  发出一次 `env_snapshot`（group=core）。**root 判定必须在 prepare_run_dir() 之前**——
+  它会把 env 写进去，事后无法区分根/子
+
+### 3.6 `vllm_sniffer/hooks/__init__.py` — 安装基础设施
 
 - `install_all()`：幂等（`_installed` 标志），三组 hooks 全 try/except
 - `is_our_wrapper()` / `mark_wrapper()`：**按类幂等**——wrapper 打 `_sniffer_wrapper` 标记，
@@ -149,10 +159,34 @@ env 解析，`get_config()` lru_cache。全部 `VLLM_SNIFFER_*` 前缀。
 - `online_smoke.py`：httpx 流式 + abort 场景（`stream_then_abort` 读几个 chunk 后断开）
   - 注意 SSE 结束符 `data: [DONE]` 需跳过；finish_reason 可能是 "length"（截断）不是 "stop"
 
+### 3.10 `tools/` — 分析工具（2026-08-09 新增，P0-2）
+
+- `common.py`：共享层——`load_events()`（run 目录 jsonl 或 parquet 统一成 dict 流，
+  **按 ts_ns 全局排序**；parquet 输入时把 data_json 解出来，两种输入下游一致）、
+  percentile / ascii_histogram（无 matplotlib 依赖）、`request_timelines()`（api 事件
+  按 req_id 组装 start/first_token/finish/abort）
+- `export_parquet.py`：多 pid jsonl 合并 → 单 parquet（扁平列 + `data_json` JSON 字符串列，
+  表 schema 永不随 data 增长变化）；pyarrow 是可选依赖（`pip install -e '.[analyze]'`）
+- `latency_report.py`：TTFT = first_token.ts - start.ts；TPOT = (finish - first_token) /
+  (n_output_tokens - 1)；offline 批（mode=offline）无 first_token 锚点单独报时长
+- `repro_compare.py`：按 prompt 长度分组查输出长度一致性（VARYING = 确定性证据）；
+  flip 密度 = 统计 flips / n_greedy；**per-request flip 归因是 ts 窗口匹配**
+  （[start.ts, finish.ts]，多个请求窗口重叠 → 标 ambiguous）——v0 限制：
+  sample_flip 事件没有 req_id（sampler 不知道），未来让 worker 侧带 req 关联
+
+### 3.11 `scripts/exp_*.py` — 真机实验脚本（2026-08-09 新增）
+
+- `exp_determinism.py`：同 prompt × N、temperature=0 的批量对拍；逐位置 diff +
+  唯一序列计数；在 import vLLM **之前** setdefault VLLM_SNIFFER_DIR，保证事件与
+  结果 JSON 落在同一 run
+- `exp_overhead.py`：三臂开销量化（VLLM_SNIFFER=0 / =1+MARGIN=0 / =1 默认），
+  每臂子进程跑同一 workload（env 隔离），解析 TOKENS/SECS 行算 tok/s
+
 ## 4. 事件类型速查
 
 | type | group | 采样 | data 关键字段 |
 |---|---|---|---|
+| env_snapshot | core | 否 | vllm/torch/python/env/sniffer/run_id（每 run 一次） |
 | request_start | api | 否 | kind/n（prompt 形状） |
 | request_first_token | api | 否 | n_prompt_tokens |
 | request_finish | api | 否 | finish_reason, n_output_tokens（累计） |
@@ -199,7 +233,10 @@ env 解析，`get_config()` lru_cache。全部 `VLLM_SNIFFER_*` 前缀。
 
 ```bash
 # 单元测试（无 vLLM 依赖，假模块注入 sys.modules 走真实安装路径）
-.venv/bin/python -m pytest -q          # 35 tests
+.venv/bin/python -m pytest -q          # 53 tests（含 tools 的 parquet 往返）
+
+# 分析工具（parquet 导出需要 pyarrow，可选）
+uv pip install --python .venv/bin/python 'pyarrow>=14'
 
 # 真机验证（GPU venv）
 uv pip install --python .venv-gpu/bin/python -e .
@@ -222,16 +259,16 @@ VLLM_SNIFFER_DIR=/tmp/sniffer-online .venv-gpu/bin/python -m vllm.entrypoints.op
 - [x] step/schedule/preempt/forward
 - [x] greedy argmax-margin 浮点观测（flip 检测 + 聚合统计）
 - [x] 真机验证（offline + online、fork + spawn、eager + cudagraph）
-- [ ] **env_snapshot**：启动时记录 vLLM commit/版本、determinism 相关 env
-  （VLLM_BATCH_INVARIANT、VLLM_FLOAT32_MATMUL_PRECISION）、cudagraph 状态、torch/cuda 版本
-  ——浮点问题归因的关键参照系
-- [ ] **分析工具**：jsonl→parquet 导出、TTFT/TPOT 分布、repro 对拍（同 prompt 多请求
-  logits 对比）、warmup 分割（首个 step 时间戳）
+- [x] **env_snapshot**：启动时记录 vLLM commit/版本、determinism 相关 env、torch/cuda 版本
+  （2026-08-09 完成，`vllm_sniffer/core/env_snapshot.py`）
+- [x] **分析工具 v0**：export_parquet / latency_report / repro_compare（2026-08-09 完成，
+  `tools/`；合成数据测试全绿，真机数据待复跑）
 - [ ] **logits 位级指纹**（采样模式，深挖数值差异来源；默认关闭保持零开销）
 - [ ] **可视化前端**（自研，读 JSONL/聚合接口；schema 已稳定 schema_ver=1）
 - [ ] **多卡 TP/PP**（rank 字段预留；sampler margin 按 rank 去重）与 **Ray 集群**
   （node_id + 本地落盘）
 - [ ] OTLP sink（可插拔）
+- [ ] 真机复跑：tools 三个工具吃 2026-08-06 真实数据；exp_determinism / exp_overhead 上 GPU
 
 ## 9. 相关文件
 

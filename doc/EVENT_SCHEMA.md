@@ -29,6 +29,7 @@
 
 | type | group | 采样 | data 关键字段 | 语义 |
 |---|---|---|---|---|
+| `env_snapshot` | core | 否 | `vllm`, `torch`, `python_version`, `env`, `sniffer`, `run_id` | **每 run 一次**的参照系：版本、determinism env、tracer 配置（主进程发出） |
 | `request_start` | api | 否 | `kind`, `n`/`n_chars` | 请求被接受（prompt 形状，不记内容） |
 | `request_first_token` | api | 否 | `n_prompt_tokens` | 流上出现首个输出 token（TTFT 锚点） |
 | `request_finish` | api | 否 | `finish_reason`, `n_output_tokens` | 流正常结束 |
@@ -62,6 +63,19 @@
   （GeneratorExit 路径，即客户端断开）
 
 ### core 组
+
+**env_snapshot**（run 参照系，每 run 一次）
+- `data.run_id`：本次 run 的目录名
+- `data.python_version`：Python 版本（`sys.version` 首段）
+- `data.vllm.vllm_version` / `data.vllm.vllm_commit`：vLLM 版本与 commit（不可得时为 null）
+- `data.torch.torch_version` / `torch_cuda` / `torch_git`：torch/CUDA 版本
+- `data.env`：**存在**的 determinism 相关 env 的值：`VLLM_BATCH_INVARIANT`、
+  `VLLM_FLOAT32_MATMUL_PRECISION`、`VLLM_USE_CUDA_GRAPH`、`VLLM_ATTENTION_BACKEND`、
+  `VLLM_WORKER_MULTIPROC_METHOD`、`VLLM_TORCH_COMPILE_LEVEL`、`NVIDIA_TF32_OVERRIDE`、
+  `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE`、`CUDA_LAUNCH_BLOCKING`、`VLLM_SNIFFER_*`
+- `data.sniffer`：tracer 自身配置（enabled/sample_rate/margin/flip_eps）
+- 发出方：**创建 run 目录的主进程**（load() 中判定 `VLLM_SNIFFER_RUN_ID` 未设置者）；
+  子进程继承该 env，不重复发出。分析层把该事件当 run 的标识记录。
 
 **step**
 - `data.dur_ns`：step 方法总耗时（含调度+执行，单卡时含前向）

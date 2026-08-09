@@ -64,6 +64,8 @@ vLLM 热路径
 - **run_id 传播**：主进程在 load() 时把 run_id 写入
   `VLLM_SNIFFER_RUN_ID` env，子进程（fork 继承 / spawn 继承 env）复用，
   同一次启动的所有进程落在同一目录
+- **run 参照系**：run 根进程（创建 run 目录者）发出一次 `env_snapshot` 事件
+  ——vLLM/torch 版本、determinism 相关 env、tracer 配置，供对拍归因
 - **跨进程关联键**：`req_id` + `step` + `ts_ns`(wall clock)
 - **消费者线程 daemon 化**：不阻塞进程退出；子进程 os._exit 路径丢失的
   尾部数据由定时 flush 兜底

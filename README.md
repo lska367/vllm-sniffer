@@ -47,6 +47,7 @@ pip install -e .
 
 | 事件 | 组 | 频率 | 内容 |
 |---|---|---|---|
+| `env_snapshot` | core | 每 run 一次 | **参照系**：vLLM/torch/CUDA/python 版本、determinism 相关 env、tracer 配置（主进程发出，子进程继承 run_id 不重复） |
 | `request_start` / `request_first_token` / `request_finish` / `request_abort` | api | 每请求 | 请求生命周期（TTFT/TPOT 排障的骨架） |
 | `step` | core | 每步 | EngineCore.step 耗时、输出数（引擎心跳） |
 | `schedule` | core | 采样 | 调度 token 数、队列规模、KV 块分配数 |
@@ -88,14 +89,49 @@ tracer 观测：**argmax margin（top1-top2）**——margin < `FLIP_EPS` 时浮
 `sample_flip` 事件标记这些高危位置；对拍分析（同 prompt 多次请求对比）在分析层完成，
 tracer 本身保持无状态。
 
+## 分析工具（`tools/`）
+
+tracer 产出原始事件流，分析层负责"讲故事"。三个独立 CLI，输入为 run 目录或 parquet：
+
+```bash
+# 1) 多 pid JSONL 合并 → 单 parquet（可选依赖：pip install -e '.[analyze]'）
+python tools/export_parquet.py /tmp/vllm-sniffer/<run_id> -o run.parquet
+
+# 2) TTFT / TPOT / step 分布（p50/p90/p99 + ASCII 直方图）
+python tools/latency_report.py run.parquet          # 或直接传 run 目录
+
+# 3) temp=0 对拍：输出长度一致性 + flip 密度 + per-request flip 归因
+python tools/repro_compare.py run.parquet
+```
+
+示例输出：
+
+```
+TTFT : n=42 p50=154.00 p90=210.00 p99=330.00 max=412.00 mean=170.00 (ms)
+flips (from stats): 19  (29.69%)     # 64-token 输出中 19 个位置处于 flip 区
+```
+
+## 真机实验脚本（`scripts/`）
+
+```bash
+# temp=0 确定性实验：同 prompt × N，逐位置 diff + 唯一序列计数
+.venv-gpu/bin/python scripts/exp_determinism.py --n 8 --max-tokens 64
+
+# 开销量化：baseline / margin-off / margin-on 三臂对比（子进程 env 隔离）
+.venv-gpu/bin/python scripts/exp_overhead.py --n 16 --max-tokens 64 --repeat 3
+```
+
+冒烟脚本：`scripts/offline_smoke.py`（eager）、`scripts/offline_smoke_cudagraph.py`、
+`scripts/online_smoke.py`（api_server + 流式 + 客户端断开）。
+
 ## Roadmap
 
 - [x] 注入层（插件自动加载、幂等、静默降级）
 - [x] 请求生命周期（online + offline）
 - [x] step / schedule / preempt / forward
 - [x] greedy argmax-margin 浮点观测（flip 检测 + 聚合统计）
-- [ ] env_snapshot（vLLM commit / determinism 相关 env / cudagraph 状态）
-- [ ] 分析工具：jsonl → parquet 导出、TTFT/TPOT 分布、repro 对拍（同 tag 对比）
+- [x] env_snapshot（vLLM commit / determinism 相关 env / cudagraph 状态）
+- [x] 分析工具：jsonl → parquet 导出、TTFT/TPOT 分布、repro 对拍（flip 归因）
 - [ ] logits 位级指纹（采样模式，深挖数值差异来源）
 - [ ] 可视化前端（自研，读 JSONL/聚合接口）
 - [ ] 多卡 TP/PP（rank 事件字段已预留）与 Ray 集群（node_id + 本地落盘）
@@ -112,12 +148,15 @@ tracer 本身保持无状态。
 - `doc/RESUME_PROJECT.md` — 求职简历项目材料（中英双语）
 - `doc/VALIDATION_LOG.md` — 真机验证记录（证据档案）
 - `doc/CONTRIBUTING.md` — 贡献指南
+- `CHANGELOG.md` — 变更日志
 
 ## 开发
 
 ```bash
 uv venv .venv && uv pip install --python .venv/bin/python pytest msgspec torch --index-url https://download.pytorch.org/whl/cpu
+# 分析工具（parquet 导出）需要：uv pip install --python .venv/bin/python 'pyarrow>=14'
 .venv/bin/python -m pytest
 ```
 
 测试不依赖真实 vLLM：用假模块注入 `sys.modules` 走真实安装路径，torch 用于验证采样探针。
+CI（GitHub Actions）在 Python 3.10/3.12 × CPU 上全量跑测试。

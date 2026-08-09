@@ -10,12 +10,15 @@ vllm-sniffer 的深度文档。根目录 `README.md` 面向使用者（快速上
 |---|---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 架构设计解析：进程模型、数据流、hook 点、设计原则 | 想整体把握项目时 |
 | [CODE_WALKTHROUGH.md](CODE_WALKTHROUGH.md) | 代码走读指南：逐文件阅读路径 + vLLM 源码对照表 + 自测题 | 准备动手改代码前 |
-| [EVENT_SCHEMA.md](EVENT_SCHEMA.md) | 10 种事件类型的完整字段语义 + JSONL 示例 | 写分析工具 / 前端 / 新 hook 时 |
+| [EVENT_SCHEMA.md](EVENT_SCHEMA.md) | 事件类型的完整字段语义 + JSONL 示例（含 `env_snapshot` 参照系事件） | 写分析工具 / 前端 / 新 hook 时 |
 | [EXTENSION_ROADMAP.md](EXTENSION_ROADMAP.md) | 延伸拓展路线图：按求职价值/科研价值/平台化分优先级 | 决定"下一步做什么"时 |
 | [RESEARCH_PLATFORM.md](RESEARCH_PLATFORM.md) | 科研工具平台规划：KV Cache 研究需求 → 采集/分析/可视化三层能力映射 | 把项目接入研究线时 |
 | [RESUME_PROJECT.md](RESUME_PROJECT.md) | 求职材料：项目亮点（中英双语）、STAR 话术、量化数据、面试问答 | 写简历 / 面试前 |
 | [VALIDATION_LOG.md](VALIDATION_LOG.md) | 真机验证记录：环境、场景矩阵、观测数据、踩坑清单 | 向别人证明项目可信时 / 复现实验时 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 开源贡献指南：开发环境、测试、PR 流程 | 准备开源发布 / 接受外部贡献时 |
+
+> 另见根目录 `CHANGELOG.md`（变更日志）与 `tools/`（分析工具：export_parquet /
+> latency_report / repro_compare，README 有用法）。
 
 ## 建议阅读路径
 

@@ -45,9 +45,17 @@ def load() -> None:
         # Fix the run_id and export it (VLLM_SNIFFER_RUN_ID) *before* vLLM
         # forks/spawns the engine core / worker processes, so all processes
         # of one launch land in the same run directory.
-        from .core.writer import prepare_run_dir
+        from .core.writer import RUN_ID_ENV, prepare_run_dir
 
+        # Root-process detection must happen *before* prepare_run_dir() sets
+        # the env var: only the process that creates the run emits the
+        # env_snapshot reference frame (children inherit the run_id and skip).
+        is_run_root = os.environ.get(RUN_ID_ENV) is None
         prepare_run_dir()
+        if is_run_root:
+            from .core.env_snapshot import emit_env_snapshot
+
+            emit_env_snapshot(is_root=True)
         if os.environ.get("VLLM_SNIFFER_DEBUG"):
             print(
                 f"[vllm-sniffer] pid={os.getpid()} hooks_installed={installed}",

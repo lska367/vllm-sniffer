@@ -89,7 +89,31 @@ ls /tmp/sniffer-test/*/
 ## 8. 待补验证项
 
 - [ ] 开/关 tracer 的逐 token 输出一致性回归（固化为 CI 步骤）
-- [ ] 开销量化对比（VLLM_SNIFFER_MARGIN=0 vs 1 的吞吐差）
+- [ ] 开销量化对比（`VLLM_SNIFFER_MARGIN=0` vs 1 的吞吐差）——脚本已备：
+      `scripts/exp_overhead.py`
 - [ ] cudagraph 捕获路径下 flip 观测的完整性（图内采样可能漏）
 - [ ] TP>1 / PP 多卡验证（rank 字段启用）
 - [ ] Ray 集群验证（node_id + 本地落盘）
+
+## 9. 新增工具与脚本（2026-08-09，合成数据验证，待真机复跑）
+
+本批新增未经 GPU 真机验证的部分如下，**勿把合成数据结论当真机证据**：
+
+| 项 | 状态 | 待办 |
+|---|---|---|
+| `env_snapshot` 事件（主进程发出） | 单测 ✅（fake 模块） | 真机确认 JSONL 首事件为 env_snapshot 且只发一次 |
+| `tools/export_parquet.py` | 合成数据 ✅（pyarrow 往返） | 真机 run 目录导出 + 查空值列 |
+| `tools/latency_report.py` | 合成数据 ✅（TTFT/TPOT 数值断言） | 用 2026-08-06 真实数据复算 TTFT p50=154ms |
+| `tools/repro_compare.py` | 合成数据 ✅（flip 归因断言） | 复现"64 token 中 19 flip"；校验 ts 归因的歧义率 |
+| `scripts/exp_determinism.py` | 导入/语法 ✅ | GPU 跑同 prompt × N 对拍 |
+| `scripts/exp_overhead.py` | 导入/语法 ✅ | GPU 跑三臂开销量化 |
+
+真机复跑命令：
+
+```bash
+.venv-gpu/bin/python scripts/exp_determinism.py --n 8 --max-tokens 64 --runs 3
+python tools/export_parquet.py /tmp/vllm-sniffer/<run_id> -o run.parquet
+python tools/latency_report.py run.parquet
+python tools/repro_compare.py run.parquet
+.venv-gpu/bin/python scripts/exp_overhead.py --n 16 --max-tokens 64 --repeat 3
+```
