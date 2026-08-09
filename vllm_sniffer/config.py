@@ -22,6 +22,14 @@ VLLM_SNIFFER_MARGIN : 0|1
 VLLM_SNIFFER_FLIP_EPS : float
     Logit gap below which a token is considered a "flip zone" (the argmax
     can be toggled by float noise). Default 1e-3.
+VLLM_SNIFFER_LOGITS_FP : 0|1
+    Deep-dive mode: per-step logits bit-level fingerprint (see
+    hooks/worker.py). Default 0 (off) -- the zero-overhead promise holds
+    unless explicitly enabled. Costs strided-row bit counts + one device
+    sync per sampled greedy step.
+VLLM_SNIFFER_LOGITS_FP_ROWS : int
+    Max rows fingerprinted per step (strided sampling over the batch).
+    Default 8, clamped to [1, 64].
 """
 
 from __future__ import annotations
@@ -38,6 +46,8 @@ class Config:
     sample_rate: float = 1.0
     margin: bool = True
     flip_eps: float = 1e-3
+    logits_fp: bool = False
+    logits_fp_rows: int = 8
     # Filled in lazily once the writer is created (first event).
     run_id: str | None = field(default=None, init=False)
 
@@ -59,6 +69,16 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 @lru_cache(maxsize=1)
 def get_config() -> Config:
     sample_rate = _env_float("VLLM_SNIFFER_SAMPLE_RATE", 1.0)
@@ -69,4 +89,8 @@ def get_config() -> Config:
         sample_rate=sample_rate,
         margin=_env_bool("VLLM_SNIFFER_MARGIN", True),
         flip_eps=_env_float("VLLM_SNIFFER_FLIP_EPS", 1e-3),
+        logits_fp=_env_bool("VLLM_SNIFFER_LOGITS_FP", False),
+        logits_fp_rows=max(
+            1, min(64, _env_int("VLLM_SNIFFER_LOGITS_FP_ROWS", 8))
+        ),
     )

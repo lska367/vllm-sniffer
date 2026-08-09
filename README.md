@@ -42,6 +42,8 @@ pip install -e .
 | `VLLM_SNIFFER_SAMPLE_RATE` | `1.0` | 高频事件（step/schedule/forward/sample_stats）采样率 |
 | `VLLM_SNIFFER_MARGIN` | `1` | greedy argmax-margin 观测（一次额外 topk(2) kernel） |
 | `VLLM_SNIFFER_FLIP_EPS` | `1e-3` | flip 区判定阈值（top1-top2 logit 差） |
+| `VLLM_SNIFFER_LOGITS_FP` | `0` | **深挖模式**：logits 位级指纹（逐行 32-bit 置位数，默认关，零开销承诺不变） |
+| `VLLM_SNIFFER_LOGITS_FP_ROWS` | `8` | 每步指纹采样行数（strided，上限 64） |
 
 ## 事件类型
 
@@ -55,6 +57,7 @@ pip install -e .
 | `forward` | worker | 采样 | 前向耗时、batch 组成 |
 | `sample_flip` | worker | 每事件 | **argmax 处于 flip 区**：margin < eps 的位置（temp=0 不稳定的根因定位） |
 | `sample_stats` | worker | 采样 | greedy 批的 margin 聚合（min/max/mean、flip 数） |
+| `logits_fp` | worker | 采样 | **logits 位级指纹**（深挖模式 `VLLM_SNIFFER_LOGITS_FP=1`）：采样行每个 bit 位的置位数，定位差异来自尾数低位噪声还是阶码系统性差异 |
 
 事件统一字段：`schema_ver` / `ts_ns`(wall clock) / `pid` / `group` / `type` /
 `req_id` / `step` / `sampled` / `data`。**不记录 prompt 原文**（只记类型/长度）。
@@ -102,6 +105,10 @@ python tools/latency_report.py run.parquet          # 或直接传 run 目录
 
 # 3) temp=0 对拍：输出长度一致性 + flip 密度 + per-request flip 归因
 python tools/repro_compare.py run.parquet
+
+# 4) logits 位级指纹对拍（P1-1，深挖模式产出）：差异位分布 + 结论分类
+#    IDENTICAL（同 batch ≈0）/ LOW-BIT NOISE（尾数位）/ SYSTEMATIC（阶码位）
+python tools/logits_fp_compare.py run-a run-b       # 两个 run 目录或 parquet
 ```
 
 示例输出：
@@ -110,6 +117,20 @@ python tools/repro_compare.py run.parquet
 TTFT : n=42 p50=154.00 p90=210.00 p99=330.00 max=412.00 mean=170.00 (ms)
 flips (from stats): 19  (29.69%)     # 64-token 输出中 19 个位置处于 flip 区
 ```
+
+## 可视化前端（`webapp/`，P2-1）
+
+离线分析 Web：FastAPI 聚合接口 + 自研前端（vanilla JS + canvas，无 CDN）。
+读取 run 目录或 parquet，四张视图：请求时间线（TTFT/TPOT）、step 耗时序列、
+flip 分布热图、batch 组成 vs 耗时散点。
+
+```bash
+uv pip install --python .venv/bin/python -e '.[web]'   # 可选依赖
+.venv/bin/python -m webapp.server --dir /tmp/vllm-sniffer --port 8080
+# 打开 http://127.0.0.1:8080 → 选 run_id → 四张图
+```
+
+接口文档：[doc/WEBAPP.md](doc/WEBAPP.md)（`/api/runs`、`/api/runs/{id}/timeline` 等 7 个端点）。
 
 ## 真机实验脚本（`scripts/`）
 
@@ -132,8 +153,8 @@ flips (from stats): 19  (29.69%)     # 64-token 输出中 19 个位置处于 fli
 - [x] greedy argmax-margin 浮点观测（flip 检测 + 聚合统计）
 - [x] env_snapshot（vLLM commit / determinism 相关 env / cudagraph 状态）
 - [x] 分析工具：jsonl → parquet 导出、TTFT/TPOT 分布、repro 对拍（flip 归因）
-- [ ] logits 位级指纹（采样模式，深挖数值差异来源）
-- [ ] 可视化前端（自研，读 JSONL/聚合接口）
+- [x] logits 位级指纹（深挖模式，默认关）——[EXTENSION_ROADMAP](doc/EXTENSION_ROADMAP.md) P1-1
+- [x] 可视化前端（自研，读 JSONL/聚合接口）——P2-1，[WEBAPP.md](doc/WEBAPP.md)
 - [ ] 多卡 TP/PP（rank 事件字段已预留）与 Ray 集群（node_id + 本地落盘）
 - [ ] OTLP sink（可插拔，对接现有可观测栈）
 
@@ -144,6 +165,7 @@ flips (from stats): 19  (29.69%)     # 64-token 输出中 19 个位置处于 fli
 - `doc/CODE_WALKTHROUGH.md` — 代码走读指南（含 vLLM 源码对照表与自测题）
 - `doc/EVENT_SCHEMA.md` — 事件流 schema 参考手册
 - `doc/EXTENSION_ROADMAP.md` — 延伸拓展路线图（分优先级）
+- `doc/WEBAPP.md` — 可视化前端使用与聚合接口文档
 - `doc/RESEARCH_PLATFORM.md` — 科研工具平台规划
 - `doc/RESUME_PROJECT.md` — 求职简历项目材料（中英双语）
 - `doc/VALIDATION_LOG.md` — 真机验证记录（证据档案）
@@ -155,8 +177,9 @@ flips (from stats): 19  (29.69%)     # 64-token 输出中 19 个位置处于 fli
 ```bash
 uv venv .venv && uv pip install --python .venv/bin/python pytest msgspec torch --index-url https://download.pytorch.org/whl/cpu
 # 分析工具（parquet 导出）需要：uv pip install --python .venv/bin/python 'pyarrow>=14'
+# 可视化前端需要：uv pip install --python .venv/bin/python -e '.[web]'
 .venv/bin/python -m pytest
 ```
 
 测试不依赖真实 vLLM：用假模块注入 `sys.modules` 走真实安装路径，torch 用于验证采样探针。
-CI（GitHub Actions）在 Python 3.10/3.12 × CPU 上全量跑测试。
+CI（GitHub Actions）在 Python 3.10/3.12 × CPU 上全量跑测试（含 webapp 接口测试）。

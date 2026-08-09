@@ -105,6 +105,10 @@ ls /tmp/sniffer-test/*/
 | `tools/export_parquet.py` | 合成数据 ✅（pyarrow 往返） | 真机 run 目录导出 + 查空值列 |
 | `tools/latency_report.py` | 合成数据 ✅（TTFT/TPOT 数值断言） | 用 2026-08-06 真实数据复算 TTFT p50=154ms |
 | `tools/repro_compare.py` | 合成数据 ✅（flip 归因断言） | 复现"64 token 中 19 flip"；校验 ts 归因的歧义率 |
+| `logits_fp` 指纹事件（P1-1） | 单测 ✅（精确 bit 计数断言、fp16 16 位） | 真机确认 vLLM 采样前 fp32（sampler.py:90 已核实）；VLLM_SNIFFER_LOGITS_FP=1 时 JSONL 有 logits_fp |
+| `tools/logits_fp_compare.py` | 合成数据 ✅（IDENTICAL / LOW-BIT NOISE / SYSTEMATIC 三分断言） | GPU 跑 solo vs mixed 两臂，产出差异位分布图 |
+| `scripts/exp_logits_fp.py` | 导入/语法 ✅ | GPU 跑 solo vs mixed 对拍并调用 compare |
+| `webapp/` 可视化前端（P2-1） | 合成数据 ✅（10 个接口用例，四视图数据源验证） | 真机 run 目录打开页面看四张图 |
 | `scripts/exp_determinism.py` | 导入/语法 ✅ | GPU 跑同 prompt × N 对拍 |
 | `scripts/exp_overhead.py` | 导入/语法 ✅ | GPU 跑三臂开销量化 |
 
@@ -112,8 +116,11 @@ ls /tmp/sniffer-test/*/
 
 ```bash
 .venv-gpu/bin/python scripts/exp_determinism.py --n 8 --max-tokens 64 --runs 3
+.venv-gpu/bin/python scripts/exp_logits_fp.py --n 8 --max-tokens 32   # P1-1 两臂对拍
 python tools/export_parquet.py /tmp/vllm-sniffer/<run_id> -o run.parquet
 python tools/latency_report.py run.parquet
 python tools/repro_compare.py run.parquet
+python tools/logits_fp_compare.py <solo_run> <mixed_run>               # 差异位分布
 .venv-gpu/bin/python scripts/exp_overhead.py --n 16 --max-tokens 64 --repeat 3
+python -m webapp.server --dir /tmp/vllm-sniffer --port 8080            # 四视图演示
 ```

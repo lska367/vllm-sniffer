@@ -40,6 +40,7 @@
 | `forward` | worker | 是 | `dur_ns`, `num_tokens`, `num_seqs`, `total_num_scheduled_tokens` | 模型前向计时 + batch 组成 |
 | `sample_flip` | worker | 否 | `margin`, `top1`, `top2` | greedy argmax 处于 flip 区（margin<eps） |
 | `sample_stats` | worker | 是 | `n_greedy`, `margin_min/max/mean`, `n_flips` | greedy 批 margin 聚合 |
+| `logits_fp` | worker | 是 | `n_rows`, `dtype`, `sampled_rows`, `rows[{row, top1, bits}]` | **logits 位级指纹**（深挖模式，默认关） |
 
 ## 3. 逐类型字段语义
 
@@ -73,7 +74,8 @@
   `VLLM_FLOAT32_MATMUL_PRECISION`、`VLLM_USE_CUDA_GRAPH`、`VLLM_ATTENTION_BACKEND`、
   `VLLM_WORKER_MULTIPROC_METHOD`、`VLLM_TORCH_COMPILE_LEVEL`、`NVIDIA_TF32_OVERRIDE`、
   `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE`、`CUDA_LAUNCH_BLOCKING`、`VLLM_SNIFFER_*`
-- `data.sniffer`：tracer 自身配置（enabled/sample_rate/margin/flip_eps）
+- `data.sniffer`：tracer 自身配置（enabled/sample_rate/margin/flip_eps/
+  logits_fp/logits_fp_rows）
 - 发出方：**创建 run 目录的主进程**（load() 中判定 `VLLM_SNIFFER_RUN_ID` 未设置者）；
   子进程继承该 env，不重复发出。分析层把该事件当 run 的标识记录。
 
@@ -110,6 +112,23 @@
 - `data.n_greedy`：本步 greedy 行数
 - `data.margin_min/max/mean`：聚合（每步 3 个标量 .item() 同步一次）
 - `data.n_flips`：本步 flip 行数
+
+**logits_fp**（深挖模式，`VLLM_SNIFFER_LOGITS_FP=1` 才产出）
+- 动机：flip 事件只标"哪里可能翻"，不解释"logits 为什么不同"。位级指纹把
+  每个采样行的 fp32 bit-pattern 分解成 32 个 bit 位的置位数：
+  `bits[b]` = 该行 logits 中第 b 位为 1 的个数。两行 logits 只要有一位不同，
+  指纹就不同；差异落在**尾数位（0..22，低位噪声）**还是**阶码/符号位
+  （23..31，系统性差异）**可区分"数值路径抖动"与"logits 整体不同"。
+- `data.n_rows`：本步总行数（batch 规模；对拍时两 run 不一致 = batch 组成变了）
+- `data.dtype`：`torch.float32`（vLLM V1 采样前统一转 fp32，生产恒为 32 位；
+  fp16/bf16 防御性支持，16 位指纹）
+- `data.sampled_rows`：实际采样的行数（≤ `VLLM_SNIFFER_LOGITS_FP_ROWS`）
+- `data.rows[]`：`row`（绝对行号）、`top1`（该行 argmax token，对拍对齐用）、
+  `bits`（长度 32 或 16 的置位数列表）
+- 行采样是 strided（linspace 均匀铺满 batch），不是随机子集——保证覆盖
+  batch 两端。成本：每采样步 k≤8 行 × 32 个 bit 归约 + 一次 D2H 同步，
+  深挖模式专用，默认关（零开销承诺不变）
+- 分析工具：`tools/logits_fp_compare.py`（两 run 逐位差异分布 + 结论分类）
 
 ## 4. 示例（真实数据形态）
 

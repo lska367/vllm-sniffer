@@ -50,6 +50,8 @@ DETERMINISM_ENV_VARS = (
     "VLLM_SNIFFER_MARGIN",
     "VLLM_SNIFFER_FLIP_EPS",
     "VLLM_SNIFFER_SAMPLE_RATE",
+    "VLLM_SNIFFER_LOGITS_FP",
+    "VLLM_SNIFFER_LOGITS_FP_ROWS",
 )
 
 _emitted: bool = False
@@ -129,6 +131,8 @@ def collect_env_snapshot() -> dict[str, Any]:
             "sample_rate": cfg.sample_rate,
             "margin": cfg.margin,
             "flip_eps": cfg.flip_eps,
+            "logits_fp": cfg.logits_fp,
+            "logits_fp_rows": cfg.logits_fp_rows,
         },
     }
 

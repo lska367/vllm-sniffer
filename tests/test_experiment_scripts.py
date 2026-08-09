@@ -52,6 +52,33 @@ def test_all_scripts_and_tools_compile():
             py_compile.compile(str(f), doraise=True)
 
 
+def test_exp_logits_fp_imports_and_parses_args():
+    mod = _load("exp_logits_fp", ROOT / "scripts" / "exp_logits_fp.py")
+    ap = mod.build_parser()
+    args = ap.parse_args(["--n", "4", "--max-tokens", "32"])
+    assert args.n == 4
+    assert args.max_tokens == 32
+    assert mod._default_probe()
+    assert mod._default_filler(0)
+
+
+def test_exp_logits_fp_requires_vllm_only_at_runtime(tmp_path, monkeypatch):
+    """Without vLLM, the experiment exits with code 2 and a hint."""
+    mod = _load("exp_logits_fp", ROOT / "scripts" / "exp_logits_fp.py")
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **kw):
+        if name == "vllm" or name.startswith("vllm."):
+            raise ImportError("No module named 'vllm'")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(sys, "argv", ["exp_logits_fp.py", "--n", "2"])
+    assert mod.main() == 2
+
+
 def test_exp_determinism_requires_vllm_only_at_runtime(tmp_path, monkeypatch):
     """Without vLLM, the experiment exits with code 2 and a hint."""
     mod = _load("exp_determinism", ROOT / "scripts" / "exp_determinism.py")

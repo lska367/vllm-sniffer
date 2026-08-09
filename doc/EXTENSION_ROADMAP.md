@@ -99,21 +99,31 @@ GitHub Actions：`uv venv + pytest`（CPU 即可，测试不依赖 GPU/vLLM）�
 
 ## P1：科研价值（对齐研究线）
 
-### P1-1 logits 位级指纹（深挖模式）
+### P1-1 logits 位级指纹（深挖模式） ✅（2026-08-09 已实现）
 
 **动机**：flip 事件只能告诉你"哪里可能翻"，不能告诉你"为什么 logits 不同"。
 位级指纹（对 logits 张量做逐位 hash，记录每个位置 32 个 bit 的分布）能定位
 差异来源：bit 低位噪声 vs 高位系统性差异 → batch 组成 vs 数值路径。
 
-**实施要点**：
+**实施要点**（已完成）：
 - 新 env `VLLM_SNIFFER_LOGITS_FP=0` 默认关（零开销承诺不变）
-- 开启时：采样模式下对 logits 做轻量指纹（如 strided 采样行的 fp32
-  bit-pattern hash），随 sample_stats 输出
-- 设计成"模式"而非"默认行为"：文档明确这是深挖模式
-- 对拍：同 prompt 在不同 batch 组成下跑，比较指纹差异位
+- 开启时：采样模式下对 logits 做轻量指纹（strided 采样行 ≤8 的 fp32
+  bit-pattern 置位数），随 `logits_fp` 事件输出（与 sample_stats 同采样门）
+- 实现：`vllm_sniffer/hooks/worker.py::_logits_fp_data`——按行统计 32 个
+  bit 位的置位数（`bits[b]`），每行附 top1 token 供对拍对齐；vLLM V1
+  采样前统一转 fp32，生产恒为 32 位指纹（fp16/bf16 防御性 16 位）
+- 分析：`tools/logits_fp_compare.py`——两 run 按 (step,row) 对齐，逐 bit
+  差异分布图（ASCII）+ 结论分类：IDENTICAL / LOW-BIT NOISE（尾数位占
+  ≥80%）/ SYSTEMATIC（阶码位占 ≥50%）/ MIXED；同时报告 batch 规模变化
+  （rows only in A/B）与 top1 不一致数
+- 实验脚本：`scripts/exp_logits_fp.py`——solo vs mixed 两臂对拍（GPU）
+- 测试：config 2 + hook 9（精确 bit 计数、strided 行、fp16 16 位、
+  margin 关闭独立运行、行为不变）+ compare 工具 6
 
-**验收**：能区分"同 batch 内差异（≈0）"vs"换 batch 组成后差异（低位噪声）"；
-产出一张差异位分布图（论文素材）。
+**验收**：✅（合成数据）能区分"同 batch 内差异（≈0）"——identical run 对拍
+VERDICT=IDENTICAL、total bit delta=0；vs"换 batch 组成后差异（低位噪声）"——
+尾数位差异 100% 集中，VERDICT=LOW-BIT NOISE，差异位分布图（ASCII）可产出。
+真机数据待 GPU 环境复跑（见 VALIDATION_LOG 待补项）。
 
 ### P1-2 repro 对拍：temp=0 复现实验
 
@@ -141,13 +151,26 @@ GitHub Actions：`uv venv + pytest`（CPU 即可，测试不依赖 GPU/vLLM）�
 
 ## P2：平台化（求职展示 + 科研平台支柱）
 
-### P2-1 可视化前端
+### P2-1 可视化前端 ✅（2026-08-09 已实现）
 
 **动机**：简历演示的"wow 因子"；科研平台的人机界面。
 **方向**：自研轻量 Web（FastAPI 聚合接口 + 前端图表），读 parquet 聚合，
 不要求实时（离线分析型）。核心视图：请求时间线（每请求 TTFT/TPOT）、
 step 耗时序列、flip 分布热图、batch 组成 vs 耗时的散点。
-**验收**：打开页面 → 选 run_id → 看到上面四张图；聚合接口有文档。
+
+**实施要点**（已完成，`webapp/` 目录）：
+- `webapp/__init__.py`：FastAPI `create_app()` 工厂——`/api/runs`（列表，
+  目录与 parquet 均可）、`/api/runs/{id}/summary|timeline|steps|flips|scatter`
+  五个聚合端点；run_id 白名单正则防路径穿越；小容量事件缓存（mtime 失效）
+- `webapp/server.py`：`python -m webapp.server --dir … --port …` 启动
+- `webapp/static/index.html`：单文件前端，vanilla JS + canvas 自绘四张图
+  （无 CDN/无图表库依赖，可离线）；run 下拉选择 + 空态提示 + 深色主题
+- 依赖：`pip install -e '.[web]'`（fastapi/uvicorn/httpx）
+- 文档：`doc/WEBAPP.md`（接口结构 + 前端说明 + 扩展指南）
+- 测试：`tests/test_webapp.py`（10 个：列表/四视图/404/路径穿越/parquet/首页）
+
+**验收**：✅ 打开页面 → 选 run_id → 看到四张图（合成数据端到端验证）；
+聚合接口有文档（doc/WEBAPP.md §2/§3）。真机数据演示待 GPU 环境复跑。
 
 ### P2-2 多卡 TP/PP + Ray
 
@@ -169,9 +192,9 @@ JSONL 是默认实现；OTLP sink 按 batch 推送。接口设计先行，实现
 ## 执行顺序建议
 
 1. ✅ **本周**：P0-1（env_snapshot）+ P0-2（分析工具 v0）——2026-08-09 完成
-2. **下周**：P0-3（README 英文版）+ P0-4（CI 已就位，剩 coverage badge）
-3. **之后**：P1-3 净化 → P1-2 复现实验（等 GPU 环境，脚本已备：
-   `scripts/exp_determinism.py`）→ P1-1
-4. P2 三项按求职时间线取舍：前端 > OTLP > 多卡
+2. ✅ P0-3（开源门面）+ P0-4（CI）——2026-08-09 就位（README 英文版待补）
+3. ✅ **P1-1 logits 位级指纹 + P2-1 可视化前端**——2026-08-09 完成（合成数据全绿）
+4. **之后**：P1-3 净化 → P1-2 复现实验（等 GPU 环境，脚本已备：
+   `scripts/exp_determinism.py` / `scripts/exp_logits_fp.py`）→ OTLP → 多卡
 
 每完成一项，更新根 README 的 Roadmap 勾选状态与 CHANGELOG。

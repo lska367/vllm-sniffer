@@ -7,6 +7,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **logits 位级指纹（P1-1，深挖模式）**：`VLLM_SNIFFER_LOGITS_FP=1` 时
+  `logits_fp` 事件逐采样行输出 fp32 bit 置位数指纹（`VLLM_SNIFFER_LOGITS_FP_ROWS`
+  控制行数，默认 8）；默认关，零开销承诺不变。vLLM V1 采样前统一转 fp32，
+  生产恒为 32 位指纹（fp16/bf16 防御性 16 位）。
+- `tools/logits_fp_compare.py`：两 run 指纹对拍——逐 bit 差异分布图（ASCII）+
+  结论分类（IDENTICAL / LOW-BIT NOISE / SYSTEMATIC / MIXED），报告 batch
+  规模变化与 top1 不一致数
+- **可视化前端（P2-1，`webapp/`）**：FastAPI 聚合接口（runs/summary/
+  timeline/steps/flips/scatter）+ 单文件 vanilla-JS canvas 前端四视图
+  （请求时间线 / step 序列 / flip 热图 / batch×耗时散点）；
+  `python -m webapp.server --dir … --port …` 启动，`pip install -e '.[web]'`
+- `scripts/exp_logits_fp.py`：GPU 对拍实验（solo vs mixed batch 组成），
+  自动调用 logits_fp_compare 输出差异位分布
+- `doc/WEBAPP.md`：前端使用 + 聚合接口文档
+- 测试：+29 个（config 2、worker hook 9、指纹对拍工具 6、webapp 10、
+  实验脚本 2）；CI 增加 web 依赖与工具 --help 检查
+
+### Changed
+
+- `install_sampler_margin_hook`：安装条件改为 margin 或 logits_fp 任一开启；
+  `env_snapshot` 记录新增 `logits_fp`/`logits_fp_rows` 配置与相关 env
+- 文档：EXTENSION_ROADMAP（P1-1/P2-1 完成）、EVENT_SCHEMA（logits_fp 登记）、
+  README（配置/事件/工具/前端/Roadmap）
+
+### Fixed
+
+- `scripts/exp_logits_fp.py` 恢复进程内 env（`finally`），避免污染同进程后续 run
+
+### Added
+
 - `env_snapshot` 事件（P0-1）：每次 run 由主进程发出一次参照系事件 —
   vLLM/torch/CUDA/python 版本、determinism 相关 env（`VLLM_BATCH_INVARIANT`、
   `VLLM_FLOAT32_MATMUL_PRECISION`、`VLLM_USE_CUDA_GRAPH` 等）、tracer 自身配置。

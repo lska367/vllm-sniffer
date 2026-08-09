@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vllm-sniffer 可视化</title>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #171e2e; --panel2: #1d2538; --border: #2a3550;
+    --text: #dbe4f5; --dim: #8b99b8; --accent: #4da3ff;
+    --ttft: #ff9f43; --tpot: #4da3ff; --green: #2ecc71; --red: #e74c3c;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text);
+         font: 14px/1.5 "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+           padding: 14px 22px; border-bottom: 1px solid var(--border);
+           background: var(--panel); position: sticky; top: 0; z-index: 10; }
+  header h1 { font-size: 17px; font-weight: 600; }
+  header h1 small { color: var(--dim); font-weight: 400; margin-left: 8px; }
+  header select { background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+                  border-radius: 6px; padding: 6px 10px; font-size: 13px; min-width: 260px; }
+  header button { background: var(--accent); color: #06121f; border: 0; border-radius: 6px;
+                  padding: 7px 16px; font-weight: 600; cursor: pointer; }
+  header button:hover { filter: brightness(1.1); }
+  #runmeta { color: var(--dim); font-size: 12px; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 18px 22px; }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+          padding: 14px 16px; }
+  .card h2 { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+  .card .sub { color: var(--dim); font-size: 12px; margin-bottom: 10px; }
+  canvas { width: 100%; height: 300px; display: block; }
+  .empty { color: var(--dim); text-align: center; padding: 60px 0; font-size: 13px; }
+  .legend { font-size: 12px; color: var(--dim); margin-top: 6px; }
+  .legend span { display: inline-block; margin-right: 14px; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+            margin-right: 5px; vertical-align: -1px; }
+  #err { color: var(--red); font-size: 13px; padding: 8px 22px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>vllm-sniffer<small>离线分析可视化</small></h1>
+  <select id="runSelect"><option value="">加载中…</option></select>
+  <button id="loadBtn">加载</button>
+  <div id="runmeta"></div>
+</header>
+<div id="err"></div>
+<main>
+  <div class="card">
+    <h2>请求时间线</h2>
+    <div class="sub">每请求 TTFT（首 token 前）+ TPOT（逐 token）时长</div>
+    <canvas id="timeline"></canvas>
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--ttft)"></i>TTFT</span>
+      <span><i class="swatch" style="background:var(--tpot)"></i>TPOT</span>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Step 耗时序列</h2>
+    <div class="sub">EngineCore 每步 dur_ns（含 warmup 虚拟批，首个真实 step 前）</div>
+    <canvas id="steps"></canvas>
+  </div>
+  <div class="card">
+    <h2>Flip 分布热图</h2>
+    <div class="sub">sample_flip 的 margin（log10）按 step 的分布 — temp=0 不稳定高危位置</div>
+    <canvas id="flips"></canvas>
+  </div>
+  <div class="card">
+    <h2>Batch 组成 vs 耗时</h2>
+    <div class="sub">forward 事件：batch token 数 × 前向耗时（点色 = 序列数）</div>
+    <canvas id="scatter"></canvas>
+    <div class="legend" id="scatterLegend"></div>
+  </div>
+</main>
+
+<script>
+"use strict";
+const COLORS = ["#4da3ff", "#2ecc71", "#ff9f43", "#e74c3c", "#a55eea", "#f7d794"];
+
+function el(id) { return document.getElementById(id); }
+
+async function api(path) {
+  const r = await fetch(path);
+  if (!r.ok) {
+    let msg = r.status + " " + r.statusText;
+    try { msg = (await r.json()).detail || msg; } catch (e) {}
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
+function setupCanvas(cv) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth || cv.parentNode.clientWidth - 30;
+  const h = cv.clientHeight || 300;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  return { ctx, w, h };
+}
+
+function drawAxes(ctx, w, h, pad, xmin, xmax, ymin, ymax, xlabel, ylabel, xfmt, yfmt) {
+  ctx.strokeStyle = "#2a3550"; ctx.fillStyle = "#8b99b8";
+  ctx.font = "11px sans-serif"; ctx.lineWidth = 1;
+  // y ticks (4)
+  for (let i = 0; i <= 4; i++) {
+    const v = ymin + (ymax - ymin) * i / 4, y = h - pad.b - (h - pad.t - pad.b) * i / 4;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+    ctx.textAlign = "right"; ctx.fillText(yfmt(v), pad.l - 6, y + 4);
+  }
+  // x ticks (5)
+  for (let i = 0; i <= 4; i++) {
+    const v = xmin + (xmax - xmin) * i / 4, x = pad.l + (w - pad.l - pad.r) * i / 4;
+    ctx.textAlign = "center"; ctx.fillText(xfmt(v), x, h - pad.b + 14);
+  }
+  ctx.fillStyle = "#8b99b8"; ctx.font = "11px sans-serif";
+  ctx.textAlign = "left"; ctx.fillText(xlabel, w - pad.r - 8, h - 4);
+  ctx.save(); ctx.translate(14, (h - pad.t) / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillText(ylabel, 0, 0); ctx.restore();
+}
+
+function fmtMs(v) { return v >= 1000 ? (v / 1000).toFixed(2) + "s" : v.toFixed(1) + "ms"; }
+
+function showEmpty(cv, text) {
+  const { ctx, w, h } = setupCanvas(cv);
+  ctx.fillStyle = "#8b99b8"; ctx.font = "13px sans-serif";
+  ctx.textAlign = "center"; ctx.fillText(text, w / 2, h / 2);
+}
+
+// ---------------- view 1: request timeline ----------------
+function drawTimeline(requests) {
+  const cv = el("timeline");
+  const list = requests.filter(r => r.start_ts != null);
+  if (!list.length) { showEmpty(cv, "该 run 无请求生命周期事件"); return; }
+  const N = Math.min(list.length, 60);
+  const shown = list.slice(0, N);
+  const { ctx, w, h } = setupCanvas(cv);
+  const pad = { l: 46, r: 10, t: 10, b: 28 };
+  const t0 = Math.min(...shown.map(r => r.start_ts));
+  const t1 = Math.max(...shown.map(r => r.finish_ts || r.start_ts));
+  const span = Math.max(t1 - t0, 1);
+  const rowH = Math.max(14, (h - pad.t - pad.b) / N - 4);
+  const x = ts => pad.l + (ts - t0) / span * (w - pad.l - pad.r);
+  ctx.font = "11px sans-serif"; ctx.fillStyle = "#8b99b8";
+  for (let i = 0; i < shown.length; i++) {
+    const r = shown[i], y = pad.t + i * (rowH + 4);
+    const ttft = r.ttft_ms != null ? r.ttft_ms * 1e6 : 0;
+    const tpot = r.tpot_ms != null ? r.tpot_ms * 1e6 : 0;
+    const end = r.finish_ts != null ? r.finish_ts : r.start_ts + ttft + tpot;
+    const x0 = x(r.start_ts), x1 = x(end);
+    ctx.fillStyle = "#1d2538";
+    ctx.fillRect(x0, y, Math.max(x1 - x0, 2), rowH);
+    if (ttft > 0) {
+      ctx.fillStyle = "var(--ttft)";
+      const xa = x(r.start_ts), xb = x(Math.min(r.start_ts + ttft, end));
+      ctx.fillRect(xa, y, Math.max(xb - xa, 2), rowH);
+    }
+    if (tpot > 0) {
+      ctx.fillStyle = "var(--tpot)";
+      const xa = x(r.start_ts + ttft), xb = x(end);
+      ctx.fillRect(Math.max(xa, x(r.start_ts)), y, Math.max(xb - Math.max(xa, x(r.start_ts)), 2), rowH);
+    }
+    if (r.aborted) { ctx.fillStyle = "#e74c3c"; ctx.fillRect(x1 - 3, y, 3, rowH); }
+    ctx.fillStyle = "#8b99b8"; ctx.textAlign = "right";
+    const label = r.req_id.length > 18 ? r.req_id.slice(0, 17) + "…" : r.req_id;
+    ctx.fillText(label, pad.l - 6, y + rowH / 2 + 4);
+  }
+  ctx.strokeStyle = "#2a3550"; ctx.beginPath();
+  ctx.moveTo(pad.l, pad.t); ctx.lineTo(pad.l, h - pad.b); ctx.stroke();
+  ctx.fillStyle = "#8b99b8"; ctx.textAlign = "center";
+  ctx.fillText("0", pad.l, h - pad.b + 14);
+  ctx.fillText(fmtMs(span / 1e6), w - pad.r, h - pad.b + 14);
+  if (list.length > N) {
+    ctx.fillText("仅显示前 " + N + " 个请求（共 " + list.length + "）", w / 2, pad.t + 4);
+  }
+}
+
+// ---------------- view 2: step duration series ----------------
+function drawSteps(steps) {
+  const cv = el("steps");
+  if (!steps.length) { showEmpty(cv, "该 run 无 step 事件"); return; }
+  const { ctx, w, h } = setupCanvas(cv);
+  const pad = { l: 52, r: 14, t: 14, b: 28 };
+  const N = steps.length;
+  const xs = steps.map((_, i) => i);
+  const ys = steps.map(s => s.dur_ms);
+  const ymax = Math.max(...ys, 1e-6) * 1.08;
+  drawAxes(ctx, w, h, pad, 0, Math.max(N - 1, 1), 0, ymax, "step 序号", "耗时 (ms)",
+           v => String(Math.round(v)), v => v.toFixed(0));
+  const X = i => pad.l + (w - pad.l - pad.r) * (N === 1 ? 0.5 : i / (N - 1));
+  const Y = v => h - pad.b - (h - pad.t - pad.b) * v / ymax;
+  ctx.strokeStyle = "var(--tpot)"; ctx.lineWidth = 1.5; ctx.beginPath();
+  steps.forEach((s, i) => { const x = X(i), y = Y(s.dur_ms);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); });
+  ctx.stroke();
+  ctx.fillStyle = "var(--tpot)";
+  steps.forEach((s, i) => { ctx.beginPath(); ctx.arc(X(i), Y(s.dur_ms), 2.5, 0, 7); ctx.fill(); });
+  const warm = steps.filter(s => s.step == null || s.step < 1);
+  if (warm.length) {
+    ctx.fillStyle = "#e74c3c"; ctx.font = "11px sans-serif"; ctx.textAlign = "right";
+    ctx.fillText("红点前为 warmup 虚拟批 (" + warm.length + ")", w - pad.r, pad.t + 4);
+    ctx.fillStyle = "#e74c3c";
+    warm.forEach((s, i) => { ctx.beginPath(); ctx.arc(X(i), Y(s.dur_ms), 3, 0, 7); ctx.fill(); });
+  }
+}
+
+// ---------------- view 3: flip heatmap ----------------
+function drawFlips(flips) {
+  const cv = el("flips");
+  if (!flips.total) { showEmpty(cv, "该 run 无 sample_flip 事件（margin < FLIP_EPS 的高危位置）"); return; }
+  const { ctx, w, h } = setupCanvas(cv);
+  const pad = { l: 46, r: 14, t: 14, b: 28 };
+  const cells = new Map();
+  flips.flips.forEach((f, i) => {
+    // x bucket: step number if present, else event-index bucket (v0 runs
+    // may lack worker-side step correlation).
+    const x = f.step != null ? f.step : Math.floor(i / 10);
+    const y = f.margin > 0 ? Math.max(-7, Math.min(0, Math.log10(f.margin))) : -7;
+    const key = x + "|" + y;
+    const cell = cells.get(key) || { x, y: Math.round(y * 2), n: 0 };
+    cell.n++; cells.set(key, cell);
+  });
+  const list = [...cells.values()];
+  const xmin = Math.min(...list.map(c => c.x)), xmax = Math.max(...list.map(c => c.x));
+  const ymin = Math.min(...list.map(c => c.y)), ymax = Math.max(...list.map(c => c.y));
+  const nx = Math.max(1, xmax - xmin + 1), ny = Math.max(1, ymax - ymin + 1);
+  const cw = (w - pad.l - pad.r) / nx, ch = (h - pad.t - pad.b) / ny;
+  const maxN = Math.max(...list.map(c => c.n));
+  const X = x => pad.l + (x - xmin) * cw, Y = y => h - pad.b - (y - ymin + 1) * ch;
+  for (const c of list) {
+    const t = Math.log(1 + c.n) / Math.log(1 + maxN);
+    const r = 13 + 232 * t, g = 23 + 40 * t, b = 45 + 30 * t;
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    ctx.fillRect(X(c.x) + 0.5, Y(c.y) + 0.5, cw - 1, ch - 1);
+  }
+  ctx.strokeStyle = "#8b99b8"; ctx.font = "11px sans-serif";
+  ctx.textAlign = "center";
+  for (let x = xmin; x <= xmax; x += Math.max(1, Math.floor(nx / 6))) {
+    ctx.fillText(String(x), X(x) + cw / 2, h - pad.b + 14);
+  }
+  ctx.textAlign = "right"; ctx.save();
+  for (let y = ymin; y <= ymax; y++) {
+    ctx.fillText("1e" + y, pad.l - 6, Y(y) + ch / 2 + 4);
+  }
+  ctx.restore();
+  ctx.fillStyle = "#8b99b8"; ctx.font = "11px sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("x=step（或时间分桶），y=log10(margin)，颜色=事件数（max " + maxN + "）",
+               pad.l, pad.t - 2);
+}
+
+// ---------------- view 4: batch vs latency scatter ----------------
+function drawScatter(points) {
+  const cv = el("scatter");
+  if (!points.length) { showEmpty(cv, "该 run 无 forward 事件"); return; }
+  const { ctx, w, h } = setupCanvas(cv);
+  const pad = { l: 52, r: 14, t: 14, b: 30 };
+  const pts = points.filter(p => p.num_tokens != null && p.dur_ms != null);
+  if (!pts.length) { showEmpty(cv, "forward 事件缺少 batch 组成字段"); return; }
+  const xmax = Math.max(...pts.map(p => p.num_tokens)) * 1.05;
+  const ymax = Math.max(...pts.map(p => p.dur_ms)) * 1.08;
+  drawAxes(ctx, w, h, pad, 0, xmax, 0, ymax, "batch token 数", "前向耗时 (ms)",
+           v => String(Math.round(v)), v => v.toFixed(0));
+  const X = v => pad.l + (w - pad.l - pad.r) * v / xmax;
+  const Y = v => h - pad.b - (h - pad.t - pad.b) * v / ymax;
+  const seqs = [...new Set(pts.map(p => p.num_seqs != null ? p.num_seqs : 0))].sort((a, b) => a - b);
+  for (const p of pts) {
+    const ci = seqs.indexOf(p.num_seqs != null ? p.num_seqs : 0);
+    ctx.fillStyle = COLORS[ci % COLORS.length];
+    ctx.beginPath(); ctx.arc(X(p.num_tokens), Y(p.dur_ms), 3.5, 0, 7); ctx.fill();
+  }
+  ctx.font = "11px sans-serif"; ctx.fillStyle = "#8b99b8"; ctx.textAlign = "left";
+  const leg = seqs.map((s, i) => `<span><i class="swatch" style="background:${COLORS[i % COLORS.length]}"></i>${s} seqs</span>`).join("");
+  el("scatterLegend").innerHTML = leg;
+}
+
+// ---------------- run loading ----------------
+async function loadRuns() {
+  const sel = el("runSelect");
+  try {
+    const data = await api("/api/runs");
+    sel.innerHTML = "";
+    if (!data.runs.length) {
+      sel.innerHTML = "<option value=''>（无 run 数据）</option>";
+      return;
+    }
+    for (const r of data.runs) {
+      const opt = document.createElement("option");
+      opt.value = r.run_id;
+      opt.textContent = `${r.run_id}  (${r.n_events} 事件, ${r.kind})`;
+      sel.appendChild(opt);
+    }
+    sel.value = data.runs[0].run_id;
+    loadRun();
+  } catch (e) {
+    el("err").textContent = "加载 run 列表失败: " + e.message;
+  }
+}
+
+async function loadRun() {
+  const run = el("runSelect").value;
+  el("err").textContent = "";
+  if (!run) return;
+  try {
+    const [summary, tl, st, fl, sc] = await Promise.all([
+      api("/api/runs/" + run + "/summary"),
+      api("/api/runs/" + run + "/timeline"),
+      api("/api/runs/" + run + "/steps"),
+      api("/api/runs/" + run + "/flips"),
+      api("/api/runs/" + run + "/scatter"),
+    ]);
+    const env = summary.env || {};
+    el("runmeta").textContent =
+      `${summary.n_events} 事件 · ${summary.span_s}s · ` +
+      (env.vllm_version ? `vLLM ${env.vllm_version}` : "") +
+      (env.torch_version ? ` · torch ${env.torch_version}` : "") +
+      (env.python_version ? ` · py ${env.python_version}` : "");
+    drawTimeline(tl.requests);
+    drawSteps(st.steps);
+    drawFlips(fl);
+    drawScatter(sc.points);
+  } catch (e) {
+    el("err").textContent = "加载 " + run + " 失败: " + e.message;
+  }
+}
+
+el("loadBtn").addEventListener("click", loadRun);
+el("runSelect").addEventListener("change", loadRun);
+window.addEventListener("resize", () => { if (el("runSelect").value) loadRun(); });
+loadRuns();
+</script>
+</body>
+</html>

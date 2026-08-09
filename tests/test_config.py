@@ -9,6 +9,9 @@ def test_defaults():
     assert cfg.sample_rate == 1.0
     assert cfg.margin is True
     assert cfg.flip_eps == 1e-3
+    # deep-dive mode is OFF by default (zero-overhead promise)
+    assert cfg.logits_fp is False
+    assert cfg.logits_fp_rows == 8
 
 
 def test_master_switch_off(monkeypatch):
@@ -46,4 +49,27 @@ def test_dir_env(monkeypatch):
     monkeypatch.setenv("VLLM_SNIFFER_DIR", "/tmp/custom")
     get_config.cache_clear()
     assert get_config().out_dir == "/tmp/custom"
+    get_config.cache_clear()
+
+
+def test_logits_fp_env(monkeypatch):
+    monkeypatch.setenv("VLLM_SNIFFER_LOGITS_FP", "1")
+    get_config.cache_clear()
+    assert get_config().logits_fp is True
+    monkeypatch.setenv("VLLM_SNIFFER_LOGITS_FP", "0")
+    get_config.cache_clear()
+    assert get_config().logits_fp is False
+    get_config.cache_clear()
+
+
+def test_logits_fp_rows_clamped(monkeypatch):
+    monkeypatch.setenv("VLLM_SNIFFER_LOGITS_FP_ROWS", "128")
+    get_config.cache_clear()
+    assert get_config().logits_fp_rows == 64  # clamped
+    monkeypatch.setenv("VLLM_SNIFFER_LOGITS_FP_ROWS", "0")
+    get_config.cache_clear()
+    assert get_config().logits_fp_rows == 1  # clamped
+    monkeypatch.setenv("VLLM_SNIFFER_LOGITS_FP_ROWS", "abc")
+    get_config.cache_clear()
+    assert get_config().logits_fp_rows == 8  # fallback
     get_config.cache_clear()

@@ -18,6 +18,13 @@ dependencies = [
 analyze = [
     "pyarrow>=14",
 ]
+# Visualization frontend (webapp/): offline aggregation server + charts.
+# httpx is needed by starlette's TestClient (used by the test suite).
+web = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "httpx>=0.27",
+]
 
 [project.entry-points."vllm.general_plugins"]
 # vLLM loads this entry point automatically at import time in every process
@@ -30,3 +37,4 @@ packages = ["vllm_sniffer"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]

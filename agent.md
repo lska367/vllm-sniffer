@@ -2,7 +2,7 @@
 
 > 供后续 agent / 开发者使用的工作档案。包含项目定位、架构、代码详解、
 > 真机验证中已验证的事实与踩坑记录、以及下一步规划。
-> 最后更新：2026-08-09（v0.1 + env_snapshot + 分析工具 v0 + 实验脚本）
+> 最后更新：2026-08-09（v0.1 + env_snapshot + 分析工具 v0 + logits 位级指纹 + 可视化前端）
 
 ---
 
@@ -72,6 +72,8 @@ vLLM 热路径 ──> hook wrapper（只读观测，try/except 全包裹）
 ### 3.2 `vllm_sniffer/config.py` — 配置
 
 env 解析，`get_config()` lru_cache。全部 `VLLM_SNIFFER_*` 前缀。
+新增（2026-08-09）：`logits_fp`（深挖模式，默认关）、`logits_fp_rows`
+（每步指纹行数，clamp 1..64）。
 
 ### 3.3 `vllm_sniffer/core/event.py` — 事件 schema
 
@@ -151,6 +153,18 @@ env 解析，`get_config()` lru_cache。全部 `VLLM_SNIFFER_*` 前缀。
   - **运行时也检查 cfg.margin**（不只安装时——wrapper 可能因共享类而残留）
   - 开销：每次 greedy 采样一次 topk(2) + 一次标量同步，对 decode 步（ms 级）<1%
   - `VLLM_SNIFFER_MARGIN=0` 完全关闭
+- **logits 位级指纹（P1-1，深挖模式，2026-08-09）**：`VLLM_SNIFFER_LOGITS_FP=1`
+  - 事实：vLLM V1 `Sampler.forward` 采样前 `logits.to(torch.float32)`（sampler.py:90）
+    → 生产指纹恒为 fp32 32 位；fp16/bf16 防御性 16 位
+  - `_logits_fp_data()`：strided 行采样（linspace 覆盖 batch 两端，≤rows 行），
+    每行 32 个 bit 位的置位数 `bits[b]`（int32 view + `(x>>b)&1` 归约，
+    算术右移对负数取位正确）；每行附 top1（margin 开启时复用 topk，否则
+    一次 argmax）供对拍对齐；事件 `logits_fp`（sampled=True，与 sample_stats
+    同采样门）
+  - 成本：每采样步 ≤8 行 × 32 个小归约 + 一次 k×32 D2H 同步——深挖模式
+    专用，默认关（零开销承诺不变）
+  - 安装条件：`cfg.margin or cfg.logits_fp`（任一开启即装 wrapper，运行时
+    分别检查）
 - 注意：TP>1 时每 rank 都跑 sampler（margin 重复计算），未来按 rank 过滤
 
 ### 3.9 `scripts/` — 真机验证脚本
@@ -173,6 +187,28 @@ env 解析，`get_config()` lru_cache。全部 `VLLM_SNIFFER_*` 前缀。
   flip 密度 = 统计 flips / n_greedy；**per-request flip 归因是 ts 窗口匹配**
   （[start.ts, finish.ts]，多个请求窗口重叠 → 标 ambiguous）——v0 限制：
   sample_flip 事件没有 req_id（sampler 不知道），未来让 worker 侧带 req 关联
+- `logits_fp_compare.py`（2026-08-09，P1-1）：两 run `logits_fp` 事件对拍
+  - 对齐：默认按序列序号（index，i-th 事件 ↔ i-th）；`--align ts` 按 ts 窗口
+  - 匹配行按绝对 row 号；逐 bit 置位数差 |Δ| 聚合 → 差异位分布图（ASCII）
+  - 结论分类：IDENTICAL（Δ=0）/ LOW-BIT NOISE（尾数位 0..22 ≥80%）/
+    SYSTEMATIC（阶码位 23..30 ≥50%）/ MIXED；报告 rows only in A/B
+    （batch 规模变化）与 top1 不一致数
+  - 限制：不同 batch 组成下 row i 未必是同一请求——分布级结论可靠，行级不可
+
+### 3.12 `webapp/` — 可视化前端（2026-08-09，P2-1）
+
+- `webapp/__init__.py`：FastAPI `create_app(out_dir)` 工厂；端点：
+  `/api/runs`（run 列表，目录+parquet）、`/api/runs/{id}/summary|timeline|
+  steps|flips|scatter`、`/healthz`；run_id 白名单 `[0-9A-Za-z._-]+` 防路径
+  穿越（`os.path.realpath` 二次校验）；`_load_cached` 小缓存（mtime 失效，
+  max 8 项）
+- `webapp/server.py`：`python -m webapp.server --dir … --port …`（uvicorn）
+- `webapp/static/index.html`：单文件前端（vanilla JS + canvas，无 CDN）；
+  四视图：请求时间线（TTFT 橙 + TPOT 蓝段）、step 序列（warmup 红点）、
+  flip 热图（x=step/序号，y=log10 margin，对数色深）、batch×耗时散点
+- 依赖：`pip install -e '.[web]'`（fastapi/uvicorn/httpx——httpx 供
+  TestClient）；测试 `tests/test_webapp.py`（10 个）
+- 文档：`doc/WEBAPP.md`（接口结构 + 前端说明 + 扩展指南）
 
 ### 3.11 `scripts/exp_*.py` — 真机实验脚本（2026-08-09 新增）
 
@@ -197,6 +233,7 @@ env 解析，`get_config()` lru_cache。全部 `VLLM_SNIFFER_*` 前缀。
 | forward | worker | 是 | dur_ns, num_tokens, num_seqs |
 | sample_flip | worker | 否 | margin, top1, top2 |
 | sample_stats | worker | 是 | n_greedy, margin_min/max/mean, n_flips |
+| logits_fp | worker | 是 | n_rows, dtype, sampled_rows, rows[{row, top1, bits}]（深挖模式） |
 
 ## 5. 真机验证记录（2026-08-06，V100 32GB + Qwen2.5-0.5B-Instruct + vLLM 0.19.1）
 
@@ -233,10 +270,13 @@ env 解析，`get_config()` lru_cache。全部 `VLLM_SNIFFER_*` 前缀。
 
 ```bash
 # 单元测试（无 vLLM 依赖，假模块注入 sys.modules 走真实安装路径）
-.venv/bin/python -m pytest -q          # 53 tests（含 tools 的 parquet 往返）
+.venv/bin/python -m pytest -q          # 82 tests（含 tools parquet 往返 + webapp 接口）
 
 # 分析工具（parquet 导出需要 pyarrow，可选）
 uv pip install --python .venv/bin/python 'pyarrow>=14'
+
+# 可视化前端（可选）
+uv pip install --python .venv/bin/python -e '.[web]'
 
 # 真机验证（GPU venv）
 uv pip install --python .venv-gpu/bin/python -e .
@@ -263,12 +303,16 @@ VLLM_SNIFFER_DIR=/tmp/sniffer-online .venv-gpu/bin/python -m vllm.entrypoints.op
   （2026-08-09 完成，`vllm_sniffer/core/env_snapshot.py`）
 - [x] **分析工具 v0**：export_parquet / latency_report / repro_compare（2026-08-09 完成，
   `tools/`；合成数据测试全绿，真机数据待复跑）
-- [ ] **logits 位级指纹**（采样模式，深挖数值差异来源；默认关闭保持零开销）
-- [ ] **可视化前端**（自研，读 JSONL/聚合接口；schema 已稳定 schema_ver=1）
+- [x] **logits 位级指纹**（采样模式，深挖数值差异来源；默认关闭保持零开销）
+  （2026-08-09 完成：`VLLM_SNIFFER_LOGITS_FP` + `logits_fp` 事件 +
+  `tools/logits_fp_compare.py` + `scripts/exp_logits_fp.py`）
+- [x] **可视化前端**（自研，读 JSONL/聚合接口；schema 已稳定 schema_ver=1）
+  （2026-08-09 完成：`webapp/` FastAPI + 单文件 canvas 前端，doc/WEBAPP.md）
 - [ ] **多卡 TP/PP**（rank 字段预留；sampler margin 按 rank 去重）与 **Ray 集群**
   （node_id + 本地落盘）
 - [ ] OTLP sink（可插拔）
-- [ ] 真机复跑：tools 三个工具吃 2026-08-06 真实数据；exp_determinism / exp_overhead 上 GPU
+- [ ] 真机复跑：tools 四个工具 + webapp 吃 2026-08-06 真实数据；
+  exp_determinism / exp_overhead / exp_logits_fp 上 GPU
 
 ## 9. 相关文件
 

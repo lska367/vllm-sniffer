@@ -24,6 +24,7 @@ jobs:
         run: |
           uv venv --python ${{ matrix.python }} .venv
           uv pip install --python .venv/bin/python pytest msgspec "pyarrow>=14" \
+            "fastapi>=0.110" "uvicorn>=0.27" "httpx>=0.27" \
             torch --index-url https://download.pytorch.org/whl/cpu
 
       - name: Run tests
@@ -34,3 +35,5 @@ jobs:
           .venv/bin/python tools/export_parquet.py --help >/dev/null
           .venv/bin/python tools/latency_report.py --help >/dev/null
           .venv/bin/python tools/repro_compare.py --help >/dev/null
+          .venv/bin/python tools/logits_fp_compare.py --help >/dev/null
+          .venv/bin/python -m webapp.server --help >/dev/null

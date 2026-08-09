@@ -128,7 +128,25 @@ vLLM 热路径
 
 tracer 只记录 margin/flip 位置，**对拍对比在分析层做**（tracer 无状态）。
 
-## 6. 设计原则总结
+**深挖模式（logits 位级指纹，默认关）**：`VLLM_SNIFFER_LOGITS_FP=1` 时
+sampler wrapper 额外对原始 logits 做 strided 行的 fp32 bit 置位数指纹
+（`logits_fp` 事件），分析层（`tools/logits_fp_compare.py`）据此区分
+"同 batch ≈0 差异"与"换 batch 组成后的尾数位噪声"。深挖模式明确不在
+默认热路径内——零开销承诺以默认配置为准。
+
+## 6. 离线分析层与可视化前端
+
+采集层产出 JSONL 事件流后，分析/展示与推理进程完全分离：
+
+- `tools/`（CLI，纯 stdlib + msgspec，pyarrow 可选）：export_parquet /
+  latency_report / repro_compare / logits_fp_compare，共享 `tools/common.py`
+  （事件加载统一 jsonl/parquet 输入、百分位/直方图、请求时间线组装）
+- `webapp/`（FastAPI + 单文件 canvas 前端，离线分析型，不要求实时）：
+  `/api/runs/{id}/summary|timeline|steps|flips|scatter` 五个聚合端点 +
+  四视图页面；run_id 白名单防路径穿越；事件小缓存（mtime 失效）。
+  详见 [WEBAPP.md](WEBAPP.md)
+
+## 7. 设计原则总结
 
 1. 观测与推理路径**完全解耦**（队列 + daemon 线程，满则丢弃）
 2. 一切防御式编程：hook 内任何一行都可能抛异常，全部 try/except
@@ -136,7 +154,7 @@ tracer 只记录 margin/flip 位置，**对拍对比在分析层做**（tracer �
 4. 隐私默认：不记 prompt 原文，只记形状
 5. 开销换价值的权衡显式化：每次新增观测都要问"成本多少、采样还是全量"
 
-## 7. 局限性（诚实清单）
+## 8. 局限性（诚实清单）
 
 - 只覆盖 V1 engine（v0.19）；V0 engine 需要额外 hook 点
 - TP>1 时每个 rank 都跑 sampler，margin 重复计算（rank 字段已预留未用）
