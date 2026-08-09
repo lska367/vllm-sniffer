@@ -34,6 +34,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 
 - `scripts/exp_logits_fp.py` 恢复进程内 env（`finally`），避免污染同进程后续 run
+- `scripts/exp_logits_fp.py` 改为**每臂 subprocess + env 清洗**（真机发现：
+  fork 的 engine 进程继承主进程 lru_cached Config，两臂同进程会串台）
+- `scripts/exp_overhead.py` 修复 TOKENS 行解析（4 字段非 3——真机首跑必崩）
+
+### 真机验证（2026-08-09，V100）
+
+- 确定性对拍：同 batch 8 请求 → 2 个唯一输出，分叉点稳定在位置 13
+  （token 476 "of" vs 13 "\n"，margin=2⁻¹⁰）；flip 事件精确命中 (476,13)×21
+- logits 位级指纹：solo-vs-solo IDENTICAL（Δ=0）；solo-vs-mixed LOW-BIT NOISE
+  （92.4% 尾数位 13..22）——P1-1 真机验收达成
+- 开销量化：baseline 1700 tok/s / margin-off +2.0% / margin-on −21.7%
+- online（spawn）：TTFT p50=28.9ms、TPOT p50=8.9ms；env_snapshot 在 fork 与
+  spawn 两条路径均为 JSONL 首事件且只发一次；webapp 四视图真机数据全通
+
+### Added
+
+- `vllm_sniffer/core/step_counter.py`：进程内 step 计数器（真机发现 step 字段
+  恒为 null；engine 入口自增，core/worker 事件全部携带迭代号；warmup=0）
+- 测试：+9 个（step 单调/仅调度迭代心跳/schedule 标记/worker 事件标记/
+  scheduler_output 兜底/scatter 兜底/TOKENS 解析/exp_logits_fp env 清洗与失败退出）
 
 ### Added
 

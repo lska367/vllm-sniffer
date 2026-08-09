@@ -81,9 +81,9 @@
 
 **step**
 - `data.dur_ns`：step 方法总耗时（含调度+执行，单卡时含前向）
-- `data.n_outputs`：本轮产出的输出数
-- 引擎心跳，**不采样**；warmup 虚拟批也会产生，分析层需按首个真实 step
-  时间戳分割（见 VALIDATION_LOG.md）
+- `data.n_outputs`：本轮产出的输出数（仅调度无输出的迭代为 0/缺省）
+- 引擎心跳，**不采样**；`step` 字段 = 迭代序号（进程内共享计数器，
+  warmup 虚拟批为 0）；分析层按首个真实 step 时间戳分割 warmup
 
 **schedule**
 - `data.total_num_scheduled_tokens`：本轮调度的 token 总数
@@ -98,7 +98,9 @@
 
 **forward**
 - `data.dur_ns`：`execute_model` 全程耗时（含 GPU kernel 等待）
-- `data.num_tokens` / `data.num_seqs`：`self.input_batch` 的 batch 组成
+- `data.num_tokens` / `data.num_seqs`：batch 组成（2026-08-09 起取自
+  `scheduler_output.num_scheduled_tokens`——input_batch 数组执行后即重置；
+  num_tokens 与 total_num_scheduled_tokens 语义等价）
 - `data.total_num_scheduled_tokens`：本次的调度 token 数（与 schedule 事件对拍）
 
 **sample_flip**（研究核心）
@@ -144,8 +146,10 @@
 
 - **请求生命周期**：`req_id` 在 api/core/worker 三组事件中保持一致
 - **时序对齐**：`ts_ns` wall clock 全局可比，跨进程排序即得全局时间线
-- **步骤对齐**：`step` 号在 engine core 与 worker 间一致（worker 的 step 由
-  engine core 传入）；api 事件无 step（异步流），用 ts_ns 就近关联
+- **步骤对齐**：`step` 号在 engine core 与 worker 间一致（2026-08-09 起：进程内
+  共享计数器——TP=1 时模型执行在 engine core 进程内，step 包装器入口自增，
+  schedule/forward/sample_*/logits_fp 读取当前值；warmup 在 step 循环外 →
+  step=0 即虚拟批标记；TP>1 的独立 worker 进程待 rank 关联）
 
 分析层建议流程：按 `req_id` 分组 → 组内按 `ts_ns` 排序 →
 TTFT = first_token.ts_ns - start.ts_ns；TPOT 用 finish/输出 token 数计算。

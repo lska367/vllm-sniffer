@@ -7,7 +7,9 @@
   不改 vLLM 源码、不改推理行为
 - **全进程覆盖**：API server / engine core / GPU worker 三个进程的 hook 自动生效
 - **JSONL 事件流**：`/tmp/vllm-sniffer/<run_id>/<pid>.jsonl`，schema 稳定，为可视化前端预留
-- **默认开销预算 <1%**：热路径只采集计数/耗时/轻量摘要，队列满时丢弃而非阻塞
+- **开销透明**（2026-08-09 真机实测，V100/0.5B）：事件管线 ≈0（+2% 噪声内）；
+  margin 探针（topk(2)+每步同步）在 0.5B 小模型上 −22%，大模型相对成本预计显著
+  下降；`VLLM_SNIFFER_MARGIN=0` 可关，`VLLM_SNIFFER=0` 全关
 
 ## 安装
 
@@ -18,9 +20,16 @@ pip install -e .
 
 不需要改启动命令。vLLM import 时会在每个进程自动加载插件。
 
-## 真机验证（2026-08-06，V100 32GB + Qwen2.5-0.5B-Instruct + vLLM 0.19.1）
+## 真机验证（2026-08-06 + 2026-08-09，V100 32GB + Qwen2.5-0.5B-Instruct + vLLM 0.19.1）
 
 - offline `LLM.generate`（eager + cudagraph 两种模式）与 online `api_server` 均验证通过
+- **2026-08-09 确定性实验**：同 batch 内 8 个相同 prompt + temp=0 → 2 个唯一输出；
+  分叉点稳定在位置 13（token 476 "of" vs 13 "\n"，margin=2⁻¹⁰ 即 fp16 精度下限），
+  分叉后 51/64 位置不再汇合；tracer 的 flip 事件精确命中该 token 对（21 次）
+- **2026-08-09 logits 位级指纹**：solo-vs-solo 完全 IDENTICAL（Δ=0）；solo-vs-mixed
+  （换 batch 组成）92.4% 差异集中在尾数位 13..22 → 低位数值路径抖动，论文素材级证据
+- **2026-08-09 开销量化**：baseline 1700 tok/s；margin-off +2.0%（事件管线≈免费）；
+  margin-on −21.7%（0.5B/V100 上 topk(2)+每步同步的真实成本）
 - **v0.19 API server 入口是 `AsyncLLM`（vllm/v1/engine/async_llm.py）而非 `AsyncLLMEngine`**：
   请求生命周期 hook 必须 patch `AsyncLLM.generate` 与 `AsyncLLM.abort`（server 显式调 abort）
 - **vLLM 子进程默认 fork**（`VLLM_WORKER_MULTIPROC_METHOD`）：hooks 靠 fork 内存继承传播，
@@ -78,8 +87,10 @@ vllm-sniffer (pip 包, entry point: vllm.general_plugins)
 
 1. **行为不变**：所有 hook 返回原值；hook 异常静默降级（记录后禁用该点），
    绝不把异常抛进推理路径；安装按类幂等（重复加载不会双重包装）
-2. **开销预算 <1%**：热路径只采集轻量字段；flip 检测在 GPU 上完成，
-   只有罕见 flip 才拷回 host；队列满丢事件不阻塞
+2. **开销透明**：热路径只采集轻量字段；flip 检测在 GPU 上完成，只有罕见 flip
+   才拷回 host；队列满丢事件不阻塞。真机实测（2026-08-09）：事件管线 ≈0 开销，
+   margin 探针在 0.5B/V100 上 −22%（`VLLM_SNIFFER_MARGIN=0` 可关）；
+   `VLLM_SNIFFER_LOGITS_FP` 深挖模式默认关（零额外开销）
 3. **可关闭**：`VLLM_SNIFFER=0` 时插件入口直接返回，等价于未安装
 
 ## 浮点不确定性观测（temp=0 输出不同）

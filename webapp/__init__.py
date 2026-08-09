@@ -240,7 +240,10 @@ def create_app(out_dir: str | None = None) -> FastAPI:
             out.append({
                 "ts_ns": ev["ts_ns"],
                 "dur_ms": round((d.get("dur_ns") or 0) / 1e6, 3),
-                "num_tokens": d.get("num_tokens"),
+                # num_tokens may be missing on older runs; the scheduler
+                # total is semantically the same number.
+                "num_tokens": (d.get("num_tokens")
+                               or d.get("total_num_scheduled_tokens")),
                 "num_seqs": d.get("num_seqs"),
             })
         return {"points": out}

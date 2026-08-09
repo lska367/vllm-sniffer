@@ -82,6 +82,15 @@ env 解析，`get_config()` lru_cache。全部 `VLLM_SNIFFER_*` 前缀。
 - data 只允许 JSON 类型（msgspec 编码）；**不记录 prompt 原文**（隐私）
 - `encode_line()`：msgspec.json.encode，快且分配少
 
+### 3.4.5 `vllm_sniffer/core/step_counter.py` — 进程内 step 计数器（2026-08-09）
+
+- 真机发现：engine/worker 事件 step 字段恒为 null（schema 承诺但从未写入）。
+  现由 engine step 包装器入口 `next_step()` 自增，schedule/forward/sample_*/
+  logits_fp 读 `current_step()`（TP=1 模型执行在 engine core 进程内，天然共享）
+- warmup 在 step 循环外 → step=0 = 虚拟批标记；异步调度返回 (None, False)
+  的"仅调度"迭代也发心跳（n_outputs=0），不再静默丢事件
+- 限制：TP>1 独立 worker 进程不共享，需 rank 关联（待 P2-2）
+
 ### 3.4 `vllm_sniffer/core/writer.py` — 每进程 JSONL writer（核心组件）
 
 - `JsonlWriter`：有界队列(8192) + daemon 线程；`_FLUSH_EVERY=32` 行或 `_FLUSH_SECS=1s`
@@ -139,8 +148,9 @@ env 解析，`get_config()` lru_cache。全部 `VLLM_SNIFFER_*` 前缀。
 
 ### 3.8 `vllm_sniffer/hooks/worker.py` — 浮点不确定性观测（研究核心）
 
-- `install_execute_model_hook`：forward 计时 + batch 组成（scheduler_output 的 token 数、
-  self.input_batch.num_tokens/num_seqs，全部 try/except 提取）
+- `forward` 事件数据：2026-08-09 起 batch 组成取自
+  `scheduler_output.num_scheduled_tokens`（input_batch 数组执行后即重置——
+  真机发现）；num_tokens 与 total_num_scheduled_tokens 语义等价
 - `install_sampler_margin_hook`：**argmax-margin 探针**（temp=0 不稳定性的量化观测）
   - 事实：temp=0 走 `logits.argmax(dim=-1)`（sampler.py:144），采样本身确定，
     输出不同 = logits 微差 → argmax 翻转。根因方向：batch 组成变化（官方
@@ -210,13 +220,17 @@ env 解析，`get_config()` lru_cache。全部 `VLLM_SNIFFER_*` 前缀。
   TestClient）；测试 `tests/test_webapp.py`（10 个）
 - 文档：`doc/WEBAPP.md`（接口结构 + 前端说明 + 扩展指南）
 
-### 3.11 `scripts/exp_*.py` — 真机实验脚本（2026-08-09 新增）
+### 3.11 `scripts/exp_*.py` — 真机实验脚本（2026-08-09 全部真机跑通）
 
 - `exp_determinism.py`：同 prompt × N、temperature=0 的批量对拍；逐位置 diff +
   唯一序列计数；在 import vLLM **之前** setdefault VLLM_SNIFFER_DIR，保证事件与
   结果 JSON 落在同一 run
 - `exp_overhead.py`：三臂开销量化（VLLM_SNIFFER=0 / =1+MARGIN=0 / =1 默认），
   每臂子进程跑同一 workload（env 隔离），解析 TOKENS/SECS 行算 tok/s
+  （**坑：TOKENS 行是 4 字段，旧 3 字段解析必崩——2026-08-09 真机首跑修复**）
+- `exp_logits_fp.py`：solo vs mixed 两臂 logits 指纹对拍（P1-1）。**必须每臂
+  subprocess + env 清洗**：fork 的 engine 进程继承主进程 lru_cached Config
+  （out_dir 还是第一臂的）→ 同进程两臂会串台（真机发现）
 
 ## 4. 事件类型速查
 
@@ -235,7 +249,7 @@ env 解析，`get_config()` lru_cache。全部 `VLLM_SNIFFER_*` 前缀。
 | sample_stats | worker | 是 | n_greedy, margin_min/max/mean, n_flips |
 | logits_fp | worker | 是 | n_rows, dtype, sampled_rows, rows[{row, top1, bits}]（深挖模式） |
 
-## 5. 真机验证记录（2026-08-06，V100 32GB + Qwen2.5-0.5B-Instruct + vLLM 0.19.1）
+## 5. 真机验证记录（2026-08-06 + 2026-08-09，V100 32GB + Qwen2.5-0.5B-Instruct + vLLM 0.19.1）
 
 - 环境：`/home/lskam/work/vllm-sniffer/.venv-gpu`（uv 创建，vllm==0.19.1 + torch 2.10.0+cu128）；
   CPU 测试 venv：`.venv`（torch cpu + pytest + msgspec）
@@ -248,6 +262,19 @@ env 解析，`get_config()` lru_cache。全部 `VLLM_SNIFFER_*` 前缀。
   patch __init__ 对当前实例无效）
 - V100 事实：无 FA2（fallback TRITON_ATTN）、bf16 自动降 fp16、`VLLM_BATCH_INVARIANT`
   需 cc>=9.0 不可用（V100 上 batch 组成影响无法用官方开关消除 → tracer 观测更有价值）
+
+### 5.1 2026-08-09 真机实验全集（全部跑通，run 目录保留在 /tmp/vllm-sniffer/）
+
+| 实验 | 结果摘要 |
+|---|---|
+| `exp_determinism --n 8 --max-tokens 64 --runs 3` | 3 run 均 8 请求 → **2 个唯一输出**；分叉点稳定在位置 13（token 476 "of" vs 13 "\n"，margin=2⁻¹⁰）；分叉后永不汇合（51/64 位）；flip 对 (476,13) 命中 21 次 |
+| `exp_logits_fp --n 8 --max-tokens 32` | solo-vs-solo **IDENTICAL Δ=0**（63 事件/287 行，同 batch 位级确定）；solo-vs-mixed **LOW-BIT NOISE 92.4% 尾数位 13..22** |
+| `exp_overhead --n 16 --max-tokens 64 --repeat 3` | baseline 1700 tok/s；margin-off **+2.0%**；margin-on **−21.7%** |
+| online api_server（spawn） | 8 请求 + 2 abort；TTFT p50=28.9ms / TPOT p50=8.9ms；flip 2.37% |
+| 工具全链路 | export_parquet（818 事件/2 pid）、latency_report、repro_compare、logits_fp_compare、webapp 四视图（9 runs）全部真机数据可用 |
+
+- env_snapshot：fork/spawn 两条路径均验证 **JSONL 首事件且只发一次**
+- step 计数器：真机验证 step 1..196 覆盖 schedule/forward/sample_*/logits_fp
 
 ## 6. 踩坑清单（#lesson，改代码前必读）
 
@@ -311,8 +338,9 @@ VLLM_SNIFFER_DIR=/tmp/sniffer-online .venv-gpu/bin/python -m vllm.entrypoints.op
 - [ ] **多卡 TP/PP**（rank 字段预留；sampler margin 按 rank 去重）与 **Ray 集群**
   （node_id + 本地落盘）
 - [ ] OTLP sink（可插拔）
-- [ ] 真机复跑：tools 四个工具 + webapp 吃 2026-08-06 真实数据；
-  exp_determinism / exp_overhead / exp_logits_fp 上 GPU
+- [ ] 真机补充：A100/H100 上重测开销量化（0.5B 上 margin 探针 −22% 是上限，
+  大模型相对成本应显著更低）；`VLLM_BATCH_INVARIANT` 对比实验（需 cc≥9.0）；
+  行为不变逐 token 回归固化为 CI
 
 ## 9. 相关文件
 

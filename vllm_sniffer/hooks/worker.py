@@ -95,9 +95,13 @@ def install_execute_model_hook() -> bool:
                     )
                 except Exception:
                     pass
-                # Batch composition: prefer the scheduler output (the
-                # input_batch arrays are reset right after execution on
-                # real vLLM, so self.input_batch reads may fail there).
+                # num_tokens: on real vLLM the input_batch arrays are reset
+                # right after execution, so default to the scheduler total
+                # (per vLLM: total == sum of per-request tokens) and let the
+                # input_batch read override it when it works.
+                if "total_num_scheduled_tokens" in data:
+                    data["num_tokens"] = data["total_num_scheduled_tokens"]
+                # Batch composition: prefer the scheduler output.
                 try:
                     nst = scheduler_output.num_scheduled_tokens
                     if isinstance(nst, dict):

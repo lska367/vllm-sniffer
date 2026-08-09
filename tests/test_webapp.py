@@ -89,6 +89,25 @@ def test_scatter(client):
     assert p["dur_ms"] == 7.0
 
 
+def test_scatter_falls_back_to_scheduler_total(tmp_path):
+    """forward events without num_tokens fall back to
+    total_num_scheduled_tokens (real-vLLM runs before the num_tokens fix)."""
+    from test_tools import _write_event
+
+    run = tmp_path / "run-old-forward"
+    run.mkdir()
+    _write_event(run / "1002.jsonl", group="worker", type="forward",
+                 sampled=True, data={"dur_ns": 7_000_000,
+                                    "total_num_scheduled_tokens": 42,
+                                    "num_seqs": 1})
+    from fastapi.testclient import TestClient
+
+    app = create_app(out_dir=str(tmp_path))
+    with TestClient(app) as c:
+        p = c.get("/api/runs/run-old-forward/scatter").json()["points"][0]
+        assert p["num_tokens"] == 42
+
+
 def test_unknown_run_404(client):
     r = client.get("/api/runs/nope/summary")
     assert r.status_code == 404
