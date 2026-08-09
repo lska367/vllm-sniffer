@@ -170,4 +170,4 @@ def test_step_event_on_none_outputs(monkeypatch, read_events):
     steps = [e for e in read_events() if e["type"] == "step"]
     assert len(steps) == 1
     assert steps[0]["step"] == 1
-    assert "n_outputs" not in steps[0]["data"]
+    assert steps[0]["data"]["n_outputs"] == 0  # no outputs this iteration
