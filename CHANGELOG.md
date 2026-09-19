@@ -5,10 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Added
+### Changed
 
-- **README 英文版**（`README_EN.md`）+ 中文主页 badge 行（CI / Python 版本 /
-  License / Coverage），CI 增加 `pytest-cov` 行覆盖率报告（90 tests / 82%）
+- README 改为英文纯净版（`README.md`）：删除全部验证/实测记录，只保留功能描述
+  与使用方法；`README_EN.md` 移除（主 README 即英文）
 
 ### Added
 
