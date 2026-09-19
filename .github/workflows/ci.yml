@@ -23,12 +23,12 @@ jobs:
       - name: Install dependencies
         run: |
           uv venv --python ${{ matrix.python }} .venv
-          uv pip install --python .venv/bin/python pytest msgspec "pyarrow>=14" \
+          uv pip install --python .venv/bin/python pytest pytest-cov msgspec "pyarrow>=14" \
             "fastapi>=0.110" "uvicorn>=0.27" "httpx>=0.27" \
             torch --index-url https://download.pytorch.org/whl/cpu
 
       - name: Run tests
-        run: .venv/bin/python -m pytest -v
+        run: .venv/bin/python -m pytest -v --cov=vllm_sniffer --cov-report=term
 
       - name: Verify tools CLIs are runnable (no-op help)
         run: |

@@ -7,6 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **README 英文版**（`README_EN.md`）+ 中文主页 badge 行（CI / Python 版本 /
+  License / Coverage），CI 增加 `pytest-cov` 行覆盖率报告（90 tests / 82%）
+
+### Added
+
 - **logits 位级指纹（P1-1，深挖模式）**：`VLLM_SNIFFER_LOGITS_FP=1` 时
   `logits_fp` 事件逐采样行输出 fp32 bit 置位数指纹（`VLLM_SNIFFER_LOGITS_FP_ROWS`
   控制行数，默认 8）；默认关，零开销承诺不变。vLLM V1 采样前统一转 fp32，

@@ -9,6 +9,8 @@ __pycache__/
 
 # Test artifacts
 /tmp/
+.coverage
+htmlcov/
 
 # Editor
 .vscode/

@@ -1,5 +1,12 @@
 # vllm-sniffer
 
+[![CI](https://img.shields.io/github/actions/workflow/status/lska367/vllm-sniffer/ci.yml?branch=master&label=CI&logo=github)](https://github.com/lska367/vllm-sniffer/actions)
+[![Python 3.10 | 3.12](https://img.shields.io/badge/python-3.10%20%7C%203.12-blue)](https://github.com/lska367/vllm-sniffer/blob/master/pyproject.toml)
+[![License](https://img.shields.io/github/license/lska367/vllm-sniffer)](LICENSE)
+[![Coverage 82%](https://img.shields.io/badge/coverage-82%25-9acd32)](https://github.com/lska367/vllm-sniffer/actions)
+
+**中文** | [English](README_EN.md)
+
 非侵入式 vLLM 运行时 tracer：观测推理热路径（调度、前向、采样、KV cache 压力），
 以及生产排障最棘手的"同样 prompt + temperature=0 却输出不同结果"的浮点不确定性。
 
@@ -193,4 +200,5 @@ uv venv .venv && uv pip install --python .venv/bin/python pytest msgspec torch -
 ```
 
 测试不依赖真实 vLLM：用假模块注入 `sys.modules` 走真实安装路径，torch 用于验证采样探针。
-CI（GitHub Actions）在 Python 3.10/3.12 × CPU 上全量跑测试（含 webapp 接口测试）。
+CI（GitHub Actions）在 Python 3.10/3.12 × CPU 上全量跑测试（含 webapp 接口测试）并输出
+`pytest-cov` 行覆盖率（当前 90 tests / 82%）。
